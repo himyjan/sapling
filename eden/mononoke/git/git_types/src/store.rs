@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use anyhow::Result;
 use blobstore::impl_loadable_storable;
 use blobstore::Blobstore;
 use bytes::Bytes;
@@ -16,6 +17,7 @@ use filestore::fetch_with_size;
 use filestore::hash_bytes;
 use filestore::Sha1IncrementalHasher;
 use futures::TryStreamExt;
+use gix_hash::ObjectId;
 use gix_object::WriteTo;
 use mononoke_types::hash::GitSha1;
 use mononoke_types::hash::RichGitSha1;
@@ -47,7 +49,7 @@ pub async fn upload_non_blob_git_object<B>(
     blobstore: &B,
     git_hash: &gix_hash::oid,
     raw_content: Vec<u8>,
-) -> anyhow::Result<(), GitError>
+) -> Result<(), GitError>
 where
     B: Blobstore + Clone,
 {
@@ -91,9 +93,9 @@ pub async fn fetch_non_blob_git_object_bytes<B>(
     ctx: &CoreContext,
     blobstore: &B,
     git_hash: &gix_hash::oid,
-) -> anyhow::Result<Bytes, GitError>
+) -> Result<Bytes, GitError>
 where
-    B: Blobstore + Clone,
+    B: Blobstore,
 {
     let blobstore_key = format!("{}{}{}", GIT_OBJECT_PREFIX, SEPARATOR, git_hash.to_hex());
     let object_bytes = blobstore
@@ -110,13 +112,13 @@ pub async fn fetch_non_blob_git_object<B>(
     ctx: &CoreContext,
     blobstore: &B,
     git_hash: &gix_hash::oid,
-) -> anyhow::Result<gix_object::Object, GitError>
+) -> Result<gix_object::Object, GitError>
 where
-    B: Blobstore + Clone,
+    B: Blobstore,
 {
     // In git, empty tree is a special object: it's present in every git repo and not persisted in
     // the storage.
-    if git_hash == gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1) {
+    if git_hash == ObjectId::empty_tree(gix_hash::Kind::Sha1) {
         return Ok(gix_object::Object::Tree(gix_object::Tree::empty()));
     }
     let raw_bytes = fetch_non_blob_git_object_bytes(ctx, blobstore, git_hash).await?;
@@ -162,6 +164,13 @@ impl GitIdentifier {
             GitIdentifier::Basic(_) => true, // May or may not be a blob, we can't know
         }
     }
+
+    pub fn to_object_id(&self) -> Result<ObjectId> {
+        match self {
+            GitIdentifier::Rich(rich_sha) => Ok(rich_sha.to_object_id()?),
+            GitIdentifier::Basic(basic_sha) => Ok(basic_sha.to_object_id()?),
+        }
+    }
 }
 
 async fn maybe_fetch_blob_bytes(
@@ -169,7 +178,7 @@ async fn maybe_fetch_blob_bytes(
     blobstore: Arc<dyn Blobstore>,
     sha: &GitSha1,
     header_state: HeaderState,
-) -> anyhow::Result<Option<Bytes>> {
+) -> Result<Option<Bytes>> {
     let fetch_key = sha.clone().into();
     let output = fetch_with_size(blobstore, ctx, &fetch_key)
         .await
@@ -202,7 +211,7 @@ pub async fn fetch_git_object_bytes(
     blobstore: Arc<dyn Blobstore>,
     identifier: &GitIdentifier,
     header_state: HeaderState,
-) -> anyhow::Result<Bytes> {
+) -> Result<Bytes> {
     let sha = identifier.basic_sha();
     if identifier.blob_identifier() {
         if let Some(blob_bytes) =
@@ -227,7 +236,7 @@ pub async fn fetch_git_object(
     ctx: &CoreContext,
     blobstore: Arc<dyn Blobstore>,
     identifier: &GitIdentifier,
-) -> anyhow::Result<gix_object::Object> {
+) -> Result<gix_object::Object> {
     let raw_bytes =
         fetch_git_object_bytes(ctx, blobstore, identifier, HeaderState::Included).await?;
     let object = gix_object::ObjectRef::from_loose(raw_bytes.as_ref()).map_err(|e| {
@@ -246,7 +255,7 @@ pub async fn upload_packfile_base_item<B>(
     blobstore: &B,
     git_hash: &gix_hash::oid,
     raw_content: Vec<u8>,
-) -> anyhow::Result<GitPackfileBaseItem, GitError>
+) -> Result<GitPackfileBaseItem, GitError>
 where
     B: Blobstore + Clone,
 {
@@ -285,7 +294,7 @@ pub async fn fetch_packfile_base_item_if_exists<B>(
     ctx: &CoreContext,
     blobstore: &B,
     git_hash: &gix_hash::oid,
-) -> anyhow::Result<Option<GitPackfileBaseItem>, GitError>
+) -> Result<Option<GitPackfileBaseItem>, GitError>
 where
     B: Blobstore + Clone,
 {
@@ -309,7 +318,7 @@ pub async fn fetch_packfile_base_item<B>(
     ctx: &CoreContext,
     blobstore: &B,
     git_hash: &gix_hash::oid,
-) -> anyhow::Result<GitPackfileBaseItem, GitError>
+) -> Result<GitPackfileBaseItem, GitError>
 where
     B: Blobstore + Clone,
 {
@@ -329,7 +338,6 @@ mod test {
     use fbinit::FacebookInit;
     use filestore::FilestoreConfig;
     use fixtures::TestRepoFixture;
-    use gix_hash::ObjectId;
     use gix_object::Object;
     use gix_object::Tag;
     use mononoke_macros::mononoke;
