@@ -53,6 +53,10 @@ DEFAULT_STOP_TIMEOUT = 20
 # Timeout for stopping aux processes
 AUX_PROCESSES_STOP_TIMEOUT = 60
 
+CONFIG_DIR_ENV_VAR = "EDENFSCTL_CONFIG_DIR"
+ETC_EDEN_DIR_ENV_VAR = "EDENFSCTL_ETC_EDEN_DIR"
+HOME_DIR_ENV_VAR = "EDENFSCTL_HOME_DIR"
+
 
 def _get_aux_processes_stop_timeout() -> int:
     """Get the timeout for stopping aux processes.
@@ -3279,14 +3283,30 @@ def create_parser() -> argparse.ArgumentParser:
     # but doesn't really contain configuration.
     global_opts.add_argument(
         "--config-dir",
-        help="Path to directory where EdenFS stores its internal state",
+        default=_get_global_path_default(CONFIG_DIR_ENV_VAR),
+        type=_expand_path,
+        help=(
+            "Path to directory where EdenFS stores its internal state. "
+            f"Defaults to ${CONFIG_DIR_ENV_VAR} if set."
+        ),
     )
     global_opts.add_argument(
         "--etc-eden-dir",
-        help="Path to directory that holds the system configuration files",
+        default=_get_global_path_default(ETC_EDEN_DIR_ENV_VAR),
+        type=_expand_path,
+        help=(
+            "Path to directory that holds the system configuration files. "
+            f"Defaults to ${ETC_EDEN_DIR_ENV_VAR} if set."
+        ),
     )
     global_opts.add_argument(
-        "--home-dir", help="Path to directory where .edenrc config file is stored"
+        "--home-dir",
+        default=_get_global_path_default(HOME_DIR_ENV_VAR),
+        type=_expand_path,
+        help=(
+            "Path to directory where .edenrc config file is stored. "
+            f"Defaults to ${HOME_DIR_ENV_VAR} if set."
+        ),
     )
     global_opts.add_argument("--checkout-dir", help=argparse.SUPPRESS)
     global_opts.add_argument(
@@ -3317,6 +3337,33 @@ def create_parser() -> argparse.ArgumentParser:
     subcmd_mod.add_subcommands(parser, subcmd.commands + subcmd_add_list)
 
     return parser
+
+
+def _expand_path(value: str) -> str:
+    """Expand environment variable references and a leading `~` in a path.
+
+    Environment variable vars are expanded first, then any resulting `~`
+    is expanded against the user's home directory.
+    Used as the argparse `type=` for the global path flags so that values
+    coming in via flag and via env var are normalized identically.
+    """
+    return os.path.expanduser(os.path.expandvars(value))
+
+
+def _get_global_path_default(env_var: str) -> Optional[str]:
+    """Default value for parser for global path flags.
+
+    Returns the raw environment variable value, or `None` when the variable
+    is unset or empty. The returned string is later passed through
+    `_expand_path` by argparse's `type=` conversion (argparse applies
+    `type=` to string defaults). Empty env values map to `None` so that
+    exporting an empty variable behaves the same as not exporting it.
+    """
+    value = os.environ.get(env_var)
+    if not value:
+        return None
+
+    return value
 
 
 def normalize_path_arg(path_arg: str, may_need_tilde_expansion: bool = False) -> str:

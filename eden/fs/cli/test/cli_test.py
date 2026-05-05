@@ -6,9 +6,11 @@
 
 # pyre-strict
 
-import sys
+import argparse
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from eden.fs.cli import main as main_mod
 from eden.fs.cli.config import (
@@ -20,6 +22,129 @@ from eden.fs.cli.config import (
 from eden.fs.service.eden.thrift_types import MountInfo, MountState
 
 from .lib.output import TestOutput
+
+
+class GlobalOptionEnvDefaultsTest(unittest.TestCase):
+    def parse_args(self, *args: str) -> argparse.Namespace:
+        return main_mod.create_parser().parse_args(list(args))
+
+    def test_global_options_use_env_defaults(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "EDENFSCTL_CONFIG_DIR": "/env/config",
+                "EDENFSCTL_ETC_EDEN_DIR": "/env/etc",
+                "EDENFSCTL_HOME_DIR": "/env/home",
+            },
+        ):
+            args = self.parse_args("--version")
+
+        self.assertEqual(args.config_dir, "/env/config")
+        self.assertEqual(args.etc_eden_dir, "/env/etc")
+        self.assertEqual(args.home_dir, "/env/home")
+
+    def test_explicit_global_options_override_env_defaults(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "EDENFSCTL_CONFIG_DIR": "/env/config",
+                "EDENFSCTL_ETC_EDEN_DIR": "/env/etc",
+                "EDENFSCTL_HOME_DIR": "/env/home",
+            },
+        ):
+            args = self.parse_args(
+                "--config-dir",
+                "/flag/config",
+                "--etc-eden-dir",
+                "/flag/etc",
+                "--home-dir",
+                "/flag/home",
+                "--version",
+            )
+
+        self.assertEqual(args.config_dir, "/flag/config")
+        self.assertEqual(args.etc_eden_dir, "/flag/etc")
+        self.assertEqual(args.home_dir, "/flag/home")
+
+    def test_env_defaults_expand_vars_and_user(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": "/env/home-dir",
+                "EDENFSCTL_TEST_ROOT": "/env/root",
+                "EDENFSCTL_CONFIG_DIR": "$EDENFSCTL_TEST_ROOT/config",
+                "EDENFSCTL_ETC_EDEN_DIR": "~/etc",
+                "EDENFSCTL_HOME_DIR": "$EDENFSCTL_TEST_ROOT/home",
+            },
+        ):
+            args = self.parse_args("--version")
+
+        self.assertEqual(args.config_dir, "/env/root/config")
+        self.assertEqual(args.etc_eden_dir, "/env/home-dir/etc")
+        self.assertEqual(args.home_dir, "/env/root/home")
+
+    def test_explicit_global_options_expand_like_env_defaults(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": "/flag/home-dir",
+                "EDENFSCTL_TEST_ROOT": "/flag/root",
+                "EDENFSCTL_CONFIG_DIR": "/env/config",
+                "EDENFSCTL_ETC_EDEN_DIR": "/env/etc",
+                "EDENFSCTL_HOME_DIR": "/env/home",
+            },
+        ):
+            args = self.parse_args(
+                "--config-dir",
+                "$EDENFSCTL_TEST_ROOT/config",
+                "--etc-eden-dir",
+                "~/etc",
+                "--home-dir",
+                "$EDENFSCTL_TEST_ROOT/home",
+                "--version",
+            )
+
+        self.assertEqual(args.config_dir, "/flag/root/config")
+        self.assertEqual(args.etc_eden_dir, "/flag/home-dir/etc")
+        self.assertEqual(args.home_dir, "/flag/root/home")
+
+    def test_empty_env_defaults_are_ignored(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "EDENFSCTL_CONFIG_DIR": "",
+                "EDENFSCTL_ETC_EDEN_DIR": "",
+                "EDENFSCTL_HOME_DIR": "",
+            },
+        ):
+            args = self.parse_args("--version")
+
+        self.assertIsNone(args.config_dir)
+        self.assertIsNone(args.etc_eden_dir)
+        self.assertIsNone(args.home_dir)
+
+    def test_env_default_paths_are_expanded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "EDENFSCTL_CONFIG_DIR": "$EDEN_TEST_BASE/config",
+                "EDEN_TEST_BASE": "/expanded/base",
+                "HOME": "/home/test",
+            },
+        ):
+            args = self.parse_args("--version")
+
+        self.assertEqual(args.config_dir, "/expanded/base/config")
+
+    def test_explicit_flag_paths_are_expanded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"EDEN_TEST_BASE": "/expanded/base", "HOME": "/home/test"},
+            clear=False,
+        ):
+            args = self.parse_args("--config-dir", "$EDEN_TEST_BASE/cfg", "--version")
+
+        self.assertEqual(args.config_dir, "/expanded/base/cfg")
 
 
 class ListTest(unittest.TestCase):
