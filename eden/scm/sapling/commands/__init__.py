@@ -854,6 +854,8 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
             raise error.Abort(_("cannot use --parent on non-merge changeset"))
         parent = p1
 
+    subtreeutil.check_commit_backoutable(repo, node)
+
     rctx = scmutil.revsingle(repo, hex(parent))
     if not opts.get("merge") and op1 != node:
         dsguard = dirstateguard.dirstateguard(repo, "backout")

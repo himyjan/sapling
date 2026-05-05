@@ -794,6 +794,26 @@ def check_commit_splitability(repo, node):
             raise error.Abort(_("cannot split subtree copy/merge commits"))
 
 
+def check_commit_backoutable(repo, node):
+    """Check if the given commit can be backed out.
+
+    Subtree commits (copy/merge) cannot be backed out because the backout
+    would lose subtree metadata.
+    """
+    extra = repo[node].extra()
+    if get_subtree_metadata(extra):
+        hint = _(
+            "use '@prog@ subtree copy -r <good-commit>' to overwrite the path,"
+            " then graft changes on top if needed"
+        )
+        if extra_hint := repo.ui.config("subtree", "backout-hint"):
+            hint = f"{hint}. {extra_hint}"
+        raise error.Abort(
+            _("cannot backout subtree copy/merge commits"),
+            hint=hint,
+        )
+
+
 def get_or_clone_git_repo(ui, url, from_rev=None):
     def try_reuse_git_repo(git_repo_dir):
         """try to reuse an existing git repo, otherwise return None"""
