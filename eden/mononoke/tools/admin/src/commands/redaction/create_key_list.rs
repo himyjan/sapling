@@ -138,6 +138,10 @@ pub async fn fetch_key_list(
                     )
                 })?;
         }
+    } else {
+        for key in key_list.keys {
+            println!("{}", key);
+        }
     }
     Ok(())
 }
