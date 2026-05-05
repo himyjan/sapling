@@ -37,7 +37,7 @@ pub fn get_host_prefix(hostname: &str) -> String {
     //
     // Returns an empty string if no prefix is found.
 
-    let re = Regex::new(r"([a-zA-Z\-]+)\d+.*").unwrap();
+    let re = Regex::new(r"^([a-zA-Z\-]+)\d+.*").unwrap();
     re.captures(hostname).map_or_else(String::new, |captures| {
         captures.get(1).unwrap().as_str().to_string()
     })
@@ -85,5 +85,9 @@ mod tests {
 
         let mbp_prefix = get_host_prefix("helsel-mbp");
         assert_eq!(mbp_prefix, "");
+
+        let ipv6_style =
+            get_host_prefix("8c50-153b-0004-0000.twshared63901.04.rva3.tw.fbinfra.net");
+        assert_eq!(ipv6_style, "");
     }
 }
