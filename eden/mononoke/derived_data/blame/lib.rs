@@ -9,6 +9,7 @@
 
 mod batch_v2;
 mod derive_v2;
+mod derive_v3;
 mod fetch;
 mod mapping_v2;
 
