@@ -49,6 +49,28 @@ pub use crate::dag_items::derivation_priority_to_str;
 pub use crate::errors::InternalError;
 pub use crate::underived::build_underived_batched_graph;
 
+/// Status of a single dependency: suffix and whether its `needed` node exists.
+pub struct DepStatus {
+    pub suffix: String,
+    pub needed_exists: bool,
+}
+
+/// Whether a queue item is in the ready state, and which priority queue.
+pub enum ReadyState {
+    NotReady,
+    ReadyHighPri,
+    ReadyLowPri,
+}
+
+/// Result of inspecting a specific DAG item in the derivation queue.
+pub struct InspectResult {
+    pub needed: Option<DagItemInfo>,
+    pub ready_state: ReadyState,
+    pub is_deriving: bool,
+    pub forward_deps: Vec<DepStatus>,
+    pub reverse_deps: Vec<DepStatus>,
+}
+
 /// Lightweight item returned from dequeue — just the ID and priority.
 /// The full DerivationDagItem is constructed during claim_derivation
 /// after fetching data from Zeus.
@@ -154,6 +176,14 @@ pub trait DerivationQueue {
     ) -> Result<EnqueueResponse, InternalError>;
 
     async fn summary(&self, ctx: &CoreContext) -> Result<DerivationQueueSummary, InternalError>;
+
+    /// Inspect the Zelos DAG state of a specific item, including its node
+    /// states, forward dependencies, and reverse dependencies.
+    async fn inspect(
+        &self,
+        ctx: &CoreContext,
+        item_id: DagItemId,
+    ) -> Result<InspectResult, InternalError>;
 
     fn derived_data_manager(&self) -> &DerivedDataManager;
 

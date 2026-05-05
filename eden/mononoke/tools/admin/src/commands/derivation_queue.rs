@@ -6,6 +6,7 @@
  */
 
 mod enqueue;
+mod inspect;
 mod summary;
 mod unsafe_evict;
 
@@ -18,6 +19,7 @@ use bookmarks::Bookmarks;
 use clap::Parser;
 use clap::Subcommand;
 use enqueue::EnqueueArgs;
+use inspect::InspectArgs;
 use metaconfig_types::RepoConfig;
 use metaconfig_types::RepoConfigRef;
 use mononoke_app::MononokeApp;
@@ -49,6 +51,8 @@ pub enum DerivationQueueSubcommand {
     Summary(SummaryArgs),
     /// Evict an item (referenced by root cs_id and derived data type) from the derivation queue. WARNING: can leave dependent items in the queue stuck
     UnsafeEvict(UnsafeEvictArgs),
+    /// Inspect the Zelos DAG state of a specific item in the derivation queue
+    Inspect(InspectArgs),
 }
 
 #[facet::container]
@@ -96,6 +100,9 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
         }
         DerivationQueueSubcommand::UnsafeEvict(args) => {
             unsafe_evict::unsafe_evict(&ctx, &repo, config_name, args).await
+        }
+        DerivationQueueSubcommand::Inspect(args) => {
+            inspect::inspect(&ctx, &repo, config_name, args).await
         }
     }
 }
