@@ -30,6 +30,12 @@ pub(super) struct FindArgs {
     repo_args: RepoArgs,
     #[clap(flatten)]
     commit_id_args: CommitIdArgs,
+    #[clap(long)]
+    /// Check access permissions (populates `has_access` in the streamed output)
+    check_permissions: bool,
+    #[clap(long)]
+    /// Return only restriction roots the caller can access
+    return_only_accessible: bool,
     #[clap(long, short)]
     /// Root paths to search under (empty for entire repository)
     root: Option<Vec<String>>,
@@ -39,13 +45,25 @@ pub(super) struct FindArgs {
 struct FindOutput {
     path: String,
     acls: Vec<String>,
+    has_access: Option<bool>,
 }
 
 impl Render for FindOutput {
     type Args = ();
 
     fn render(&self, _args: &Self::Args, w: &mut dyn Write) -> Result<()> {
-        writeln!(w, "{} (ACLs: {})", self.path, self.acls.join(", "))?;
+        let access = match self.has_access {
+            Some(true) => ", access: allowed",
+            Some(false) => ", access: denied",
+            None => "",
+        };
+        writeln!(
+            w,
+            "{} (ACLs: {}{})",
+            self.path,
+            self.acls.join(", "),
+            access
+        )?;
         Ok(())
     }
 
@@ -69,6 +87,8 @@ pub(super) async fn run(app: ScscApp, args: FindArgs) -> Result<()> {
     let roots = args.root.unwrap_or_default().into_iter().collect();
     let params = thrift::CommitFindRestrictedPathsParams {
         roots,
+        check_permissions: Some(args.check_permissions),
+        return_only_accessible: Some(args.return_only_accessible),
         ..Default::default()
     };
 
@@ -81,6 +101,7 @@ pub(super) async fn run(app: ScscApp, args: FindArgs) -> Result<()> {
         .map_ok(|item| FindOutput {
             path: item.path,
             acls: item.acls,
+            has_access: item.has_access,
         })
         .map_err(Into::into);
 
