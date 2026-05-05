@@ -11,6 +11,7 @@
 pub mod acl_manifest;
 pub mod basename_suffix_skeleton_manifest_v3;
 pub mod blame_v2;
+pub mod blame_v3;
 pub mod blob;
 pub mod bonsai_changeset;
 pub mod case_conflict_skeleton_manifest;
