@@ -122,6 +122,8 @@ pub(crate) async fn restricted_paths_access_impl(
 pub(crate) async fn find_nested_restricted_roots(
     cs_ctx: &ChangesetContext<Repo>,
     filter_roots: BTreeSet<String>,
+    check_permissions: bool,
+    return_only_accessible: bool,
 ) -> Result<
     BoxStream<
         'static,
@@ -141,13 +143,20 @@ pub(crate) async fn find_nested_restricted_roots(
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    let descendants = cs_ctx.find_restricted_descendants(roots).await?;
+    let descendants = cs_ctx
+        .find_restricted_descendants(roots, check_permissions || return_only_accessible)
+        .await?;
 
     Ok((async_stream::stream! {
         for info in descendants {
+            if return_only_accessible && info.has_access != Some(true) {
+                continue;
+            }
+
             yield Ok(thrift::CommitFindRestrictedPathsStreamItem {
                 path: info.restriction_root().to_string(),
                 acls: vec![info.repo_region_acl().to_string()],
+                has_access: if check_permissions { info.has_access } else { None },
                 ..Default::default()
             });
         }
@@ -191,6 +200,7 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::Context;
+    use async_trait::async_trait;
     use context::CoreContext;
     use fbinit::FacebookInit;
     use metaconfig_types::RestrictedPathsConfig;
@@ -199,7 +209,14 @@ mod tests {
     use mononoke_api::changeset::ChangesetContext;
     use mononoke_macros::mononoke;
     use mononoke_types::RepositoryId;
+    use permission_checker::AclProvider;
+    use permission_checker::AlwaysMember;
+    use permission_checker::BoxMembershipChecker;
+    use permission_checker::BoxPermissionChecker;
     use permission_checker::MononokeIdentity;
+    use permission_checker::MononokeIdentitySet;
+    use permission_checker::NeverMember;
+    use permission_checker::PermissionCheckerBuilder;
     use permission_checker::dummy::DummyAclProvider;
     use repo_derived_data::RepoDerivedDataArc;
     use restricted_paths::ArcRestrictedPaths;
@@ -213,10 +230,62 @@ mod tests {
 
     use super::*;
 
-    /// Helper to create RestrictedPaths for testing
-    async fn create_test_restricted_paths(
+    struct TestAclProvider {
+        allow_repo_region_reads: bool,
+    }
+
+    impl TestAclProvider {
+        fn new(allow_repo_region_reads: bool) -> Arc<dyn AclProvider> {
+            Arc::new(Self {
+                allow_repo_region_reads,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AclProvider for TestAclProvider {
+        async fn repo_acl(&self, _name: &str) -> Result<BoxPermissionChecker> {
+            Ok(PermissionCheckerBuilder::new().allow_all().build())
+        }
+
+        async fn repo_region_acl(&self, _name: &str) -> Result<BoxPermissionChecker> {
+            let builder = PermissionCheckerBuilder::new();
+            Ok(if self.allow_repo_region_reads {
+                builder.allow_all().build()
+            } else {
+                builder.build()
+            })
+        }
+
+        async fn tier_acl(&self, _name: &str) -> Result<BoxPermissionChecker> {
+            Ok(PermissionCheckerBuilder::new().allow_all().build())
+        }
+
+        async fn commitcloud_workspace_acl(
+            &self,
+            _name: &str,
+            _create_with_owner: &Option<MononokeIdentitySet>,
+        ) -> Result<Option<BoxPermissionChecker>> {
+            Ok(Some(PermissionCheckerBuilder::new().allow_all().build()))
+        }
+
+        async fn group(&self, _name: &str) -> Result<BoxMembershipChecker> {
+            Ok(NeverMember::new())
+        }
+
+        async fn admin_group(&self) -> Result<BoxMembershipChecker> {
+            Ok(NeverMember::new())
+        }
+
+        async fn reviewers_group(&self) -> Result<BoxMembershipChecker> {
+            Ok(AlwaysMember::new())
+        }
+    }
+
+    async fn create_test_restricted_paths_with_acl_provider(
         fb: FacebookInit,
         path_acls: Vec<(&str, &str)>, // (path, "TYPE:acl_name")
+        acl_provider: Arc<dyn AclProvider>,
     ) -> Result<ArcRestrictedPaths> {
         let repo_id = RepositoryId::new(0);
 
@@ -245,8 +314,6 @@ mod tests {
                 .with_repo_id(repo_id),
         );
 
-        // TODO(T248649079): test the ACL checks logic
-        let acl_provider = DummyAclProvider::new(fb)?;
         let scuba = MononokeScubaSampleBuilder::with_discard();
 
         let config_based = Arc::new(RestrictedPathsConfigBased::new(
@@ -272,7 +339,16 @@ mod tests {
         fb: FacebookInit,
         path_acls: Vec<(&str, &str)>,
     ) -> Result<ChangesetContext<Repo>> {
-        let restricted_paths = create_test_restricted_paths(fb, path_acls).await?;
+        create_test_changeset_with_acl_provider(fb, path_acls, DummyAclProvider::new(fb)?).await
+    }
+
+    async fn create_test_changeset_with_acl_provider(
+        fb: FacebookInit,
+        path_acls: Vec<(&str, &str)>,
+        acl_provider: Arc<dyn AclProvider>,
+    ) -> Result<ChangesetContext<Repo>> {
+        let restricted_paths =
+            create_test_restricted_paths_with_acl_provider(fb, path_acls, acl_provider).await?;
         let ctx = CoreContext::test_mock(fb);
 
         let repo: Repo = TestRepoFactory::new(fb)
@@ -553,13 +629,32 @@ mod tests {
         cs_ctx: &ChangesetContext<Repo>,
         filter: BTreeSet<String>,
     ) -> Result<Vec<(String, String)>> {
+        let result = collect_nested_roots_with_options(cs_ctx, filter, false, false).await?;
+        Ok(result
+            .into_iter()
+            .map(|(path, acl, _has_access)| (path, acl))
+            .collect())
+    }
+
+    async fn collect_nested_roots_with_options(
+        cs_ctx: &ChangesetContext<Repo>,
+        filter: BTreeSet<String>,
+        check_permissions: bool,
+        return_only_accessible: bool,
+    ) -> Result<Vec<(String, String, Option<bool>)>> {
         use futures::TryStreamExt;
         use scs_errors::LoggableError;
 
-        find_nested_restricted_roots(cs_ctx, filter)
+        find_nested_restricted_roots(cs_ctx, filter, check_permissions, return_only_accessible)
             .await
             .map_err(|e| anyhow::anyhow!(e.status_and_description().1))?
-            .map_ok(|item| (item.path, item.acls.into_iter().next().unwrap_or_default()))
+            .map_ok(|item| {
+                (
+                    item.path,
+                    item.acls.into_iter().next().unwrap_or_default(),
+                    item.has_access,
+                )
+            })
             .try_collect()
             .await
             .map_err(|e| anyhow::anyhow!(e.status_and_description().1))
@@ -706,6 +801,69 @@ mod tests {
         assert!(paths.contains(&"first/path"));
         assert!(paths.contains(&"third/path"));
         assert!(!paths.contains(&"second/path"));
+
+        Ok(())
+    }
+
+    #[mononoke::fbinit_test]
+    async fn test_find_nested_roots_check_permissions_populates_access(
+        fb: FacebookInit,
+    ) -> Result<()> {
+        let cs_ctx =
+            create_test_changeset(fb, vec![("restricted", "REPO_REGION:restricted-acl")]).await?;
+
+        let result =
+            collect_nested_roots_with_options(&cs_ctx, BTreeSet::new(), true, false).await?;
+
+        assert_eq!(
+            result,
+            vec![(
+                "restricted".to_string(),
+                "REPO_REGION:restricted-acl".to_string(),
+                Some(true),
+            )]
+        );
+
+        Ok(())
+    }
+
+    #[mononoke::fbinit_test]
+    async fn test_find_nested_roots_return_only_accessible_filters_denied_results(
+        fb: FacebookInit,
+    ) -> Result<()> {
+        let cs_ctx = create_test_changeset_with_acl_provider(
+            fb,
+            vec![("restricted", "REPO_REGION:restricted-acl")],
+            TestAclProvider::new(false),
+        )
+        .await?;
+
+        let result =
+            collect_nested_roots_with_options(&cs_ctx, BTreeSet::new(), false, true).await?;
+
+        assert!(result.is_empty());
+
+        Ok(())
+    }
+
+    #[mononoke::fbinit_test]
+    async fn test_find_nested_roots_return_only_accessible_hides_access_when_not_requested(
+        fb: FacebookInit,
+    ) -> Result<()> {
+        let cs_ctx =
+            create_test_changeset(fb, vec![("restricted", "REPO_REGION:restricted-acl")]).await?;
+
+        let result =
+            collect_nested_roots_with_options(&cs_ctx, BTreeSet::new(), false, true).await?;
+
+        assert_eq!(
+            result,
+            vec![(
+                "restricted".to_string(),
+                "REPO_REGION:restricted-acl".to_string(),
+                None,
+            )]
+        );
 
         Ok(())
     }

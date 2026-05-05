@@ -101,6 +101,7 @@ use crate::repo::RepoContext;
 use crate::restricted_paths::PathAccessInfo;
 use crate::restricted_paths::RestrictedChangeGroup;
 use crate::restricted_paths::RestrictedPathsChangesInfo;
+use crate::restricted_paths::build_path_access_info;
 use crate::specifiers::ChangesetId;
 use crate::specifiers::GitSha1;
 use crate::specifiers::HgChangesetId;
@@ -2054,9 +2055,14 @@ impl<R: MononokeRepo> ChangesetContext<R> {
     /// Returns PathAccessInfo for all restriction roots
     /// that are descendants of any of the given root paths.
     /// Results are deduplicated by restriction_root.
+    ///
+    /// When `check_permissions` is true, each `PathAccessInfo` will have
+    /// its `has_access` field populated with the result of an ACL check.
+    /// When false, `has_access` will be `None`.
     pub async fn find_restricted_descendants(
         &self,
         roots: Vec<MPath>,
+        check_permissions: bool,
     ) -> Result<Vec<PathAccessInfo>, MononokeError> {
         let restricted_paths = self.repo_ctx().repo().restricted_paths_arc();
         let cs_id = self.id();
@@ -2065,13 +2071,13 @@ impl<R: MononokeRepo> ChangesetContext<R> {
             .find_restricted_descendants(self.ctx(), Some(cs_id), roots)
             .await?;
 
-        Ok(restriction_infos
-            .into_iter()
-            .map(|restriction| PathAccessInfo {
-                restriction,
-                has_access: None,
-            })
-            .collect())
+        build_path_access_info(
+            self.ctx(),
+            restricted_paths.acl_provider(),
+            restriction_infos,
+            check_permissions,
+        )
+        .await
     }
 
     /// Determine which changed files in this changeset touch restricted paths.

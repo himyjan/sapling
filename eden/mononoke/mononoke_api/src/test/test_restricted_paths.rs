@@ -401,7 +401,7 @@ async fn test_find_descendants_no_restrictions(fb: FacebookInit) -> Result<()> {
     let descendants = cs_ctx
         .path_restriction(MPath::ROOT)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     assert!(descendants.is_empty());
@@ -423,7 +423,7 @@ async fn test_find_descendants_root_returns_all(fb: FacebookInit) -> Result<()> 
     let descendants = cs_ctx
         .path_restriction(MPath::ROOT)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     let expected = vec![
@@ -452,6 +452,32 @@ async fn test_find_descendants_root_returns_all(fb: FacebookInit) -> Result<()> 
 }
 
 #[mononoke::fbinit_test]
+async fn test_find_descendants_check_permissions_populates_access(fb: FacebookInit) -> Result<()> {
+    let (_repo_ctx, cs_ctx) =
+        create_test_changeset(fb, vec![("restricted/path", "TIER:restricted-acl")]).await?;
+
+    let descendants = cs_ctx
+        .path_restriction(MPath::ROOT)
+        .await?
+        .find_restricted_descendants(true)
+        .await?;
+
+    let expected = vec![PathAccessInfo {
+        restriction: PathRestrictionInfo {
+            restriction_root: NonRootMPath::new("restricted/path")?,
+            repo_region_acl: "TIER:restricted-acl".to_string(),
+            request_acl: "TIER:restricted-acl".to_string(),
+        },
+        has_access: Some(true),
+    }];
+    let mut actual = descendants;
+    actual.sort_by(|a, b| a.restriction_root().cmp(b.restriction_root()));
+    pretty_assertions::assert_eq!(actual, expected);
+
+    Ok(())
+}
+
+#[mononoke::fbinit_test]
 async fn test_find_descendants_filter_exact_match(fb: FacebookInit) -> Result<()> {
     let (_repo_ctx, cs_ctx) = create_test_changeset(
         fb,
@@ -465,7 +491,7 @@ async fn test_find_descendants_filter_exact_match(fb: FacebookInit) -> Result<()
     let descendants = cs_ctx
         .path_restriction(MPath::try_from("first/path")?)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     // "first/path" is itself a restriction root, and is_prefix_of returns
@@ -493,7 +519,7 @@ async fn test_find_descendants_filter_parent_of_root(fb: FacebookInit) -> Result
     let descendants = cs_ctx
         .path_restriction(MPath::try_from("foo")?)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     let expected = vec![PathAccessInfo {
@@ -520,7 +546,7 @@ async fn test_find_descendants_filter_child_of_root_returns_empty(fb: FacebookIn
     let descendants = cs_ctx
         .path_restriction(MPath::try_from("foo/bar/baz/deep")?)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     assert!(descendants.is_empty());
@@ -542,7 +568,7 @@ async fn test_find_descendants_filter_no_match(fb: FacebookInit) -> Result<()> {
     let descendants = cs_ctx
         .path_restriction(MPath::try_from("third/path")?)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     assert!(descendants.is_empty());
@@ -557,7 +583,7 @@ async fn test_find_descendants_filter_sibling_no_match(fb: FacebookInit) -> Resu
     let descendants = cs_ctx
         .path_restriction(MPath::try_from("foo/baz")?)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     assert!(descendants.is_empty());
@@ -578,7 +604,7 @@ async fn test_find_descendants_nested_roots(fb: FacebookInit) -> Result<()> {
     let descendants = cs_ctx
         .path_restriction(MPath::try_from("foo")?)
         .await?
-        .find_restricted_descendants()
+        .find_restricted_descendants(false)
         .await?;
 
     let expected = vec![
@@ -625,7 +651,7 @@ async fn test_batch_find_descendants_multiple_roots(fb: FacebookInit) -> Result<
         MPath::try_from("third/path")?,
     ];
 
-    let descendants = cs_ctx.find_restricted_descendants(roots).await?;
+    let descendants = cs_ctx.find_restricted_descendants(roots, false).await?;
 
     let expected = vec![
         PathAccessInfo {
@@ -660,7 +686,7 @@ async fn test_batch_find_descendants_deduplicates(fb: FacebookInit) -> Result<()
     // Both roots are parents of the same restriction root
     let roots = vec![MPath::try_from("shared")?, MPath::ROOT];
 
-    let descendants = cs_ctx.find_restricted_descendants(roots).await?;
+    let descendants = cs_ctx.find_restricted_descendants(roots, false).await?;
 
     // Should be deduplicated to just one entry
     let expected = vec![PathAccessInfo {
@@ -697,7 +723,7 @@ async fn test_batch_find_descendants_nested_roots_and_queries(fb: FacebookInit) 
     // After dedup: foo/ and foo/bar/ (baz/ not matched by either query).
     let roots = vec![MPath::try_from("foo")?, MPath::try_from("foo/bar")?];
 
-    let descendants = cs_ctx.find_restricted_descendants(roots).await?;
+    let descendants = cs_ctx.find_restricted_descendants(roots, false).await?;
 
     let expected = vec![
         PathAccessInfo {

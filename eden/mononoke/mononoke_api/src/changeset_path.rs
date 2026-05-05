@@ -7,9 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::str::FromStr;
 
-use anyhow::Context;
 use anyhow::Error;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -56,11 +54,9 @@ use mononoke_types::blame_v2::BlameV2;
 use mononoke_types::content_manifest::compat;
 use mononoke_types::deleted_manifest_common::DeletedManifestCommon;
 use mononoke_types::path::MPath;
-use permission_checker::MononokeIdentity;
 use repo_blobstore::RepoBlobstoreRef;
 use repo_identity::RepoIdentityRef;
 use restricted_paths::RestrictedPathsArc;
-use restricted_paths::has_read_access_to_repo_region_acls;
 
 use crate::MononokeRepo;
 use crate::changeset::ChangesetContext;
@@ -68,6 +64,7 @@ use crate::errors::MononokeError;
 use crate::file::FileContext;
 use crate::repo::RepoContext;
 use crate::restricted_paths::PathAccessInfo;
+use crate::restricted_paths::build_path_access_info;
 use crate::tree::TreeContext;
 
 pub struct HistoryEntry {
@@ -1090,63 +1087,26 @@ impl<R: MononokeRepo> ChangesetPathRestrictionContext<R> {
             return Ok(vec![]);
         }
 
-        if !check_permissions {
-            return Ok(restriction_infos
-                .into_iter()
-                .map(|restriction| PathAccessInfo {
-                    restriction,
-                    has_access: None,
-                })
-                .collect());
-        }
-
-        // Check permissions concurrently for each restriction
-        stream::iter(restriction_infos)
-            .map(|restriction| {
-                let restricted_paths = restricted_paths.clone();
-                async move {
-                    let acl = MononokeIdentity::from_str(&restriction.repo_region_acl)
-                        .context("Failed to parse repo_region_acl")?;
-                    let has_access = has_read_access_to_repo_region_acls(
-                        self.changeset().ctx(),
-                        restricted_paths.acl_provider(),
-                        &[&acl],
-                    )
-                    .await?;
-                    Ok::<_, MononokeError>(PathAccessInfo {
-                        restriction,
-                        has_access: Some(has_access),
-                    })
-                }
-            })
-            .buffer_unordered(100)
-            .try_collect()
-            .await
+        build_path_access_info(
+            self.changeset().ctx(),
+            restricted_paths.acl_provider(),
+            restriction_infos,
+            check_permissions,
+        )
+        .await
     }
 
     /// Find all restricted paths that are descendants of this path.
     ///
     /// Returns restriction info for each restriction root under this path.
     /// Since the number of roots can grow, this method will not perform
-    /// access checks. Callers should check access individually.
-    pub async fn find_restricted_descendants(&self) -> Result<Vec<PathAccessInfo>, MononokeError> {
-        let restricted_paths = self.changeset().repo_ctx().repo().restricted_paths_arc();
-        let cs_id = self.changeset().id();
-
-        let restriction_infos = restricted_paths
-            .find_restricted_descendants(
-                self.changeset().ctx(),
-                Some(cs_id),
-                vec![self.path().clone()],
-            )
-            .await?;
-
-        Ok(restriction_infos
-            .into_iter()
-            .map(|restriction| PathAccessInfo {
-                restriction,
-                has_access: None,
-            })
-            .collect())
+    /// access checks unless `check_permissions` is true.
+    pub async fn find_restricted_descendants(
+        &self,
+        check_permissions: bool,
+    ) -> Result<Vec<PathAccessInfo>, MononokeError> {
+        self.changeset()
+            .find_restricted_descendants(vec![self.path().clone()], check_permissions)
+            .await
     }
 }

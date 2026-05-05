@@ -2014,9 +2014,16 @@ impl SourceControlServiceImpl {
         }
 
         let filter_roots: BTreeSet<String> = params.roots.into_iter().collect();
+        let check_permissions = params.check_permissions.unwrap_or(false);
+        let return_only_accessible = params.return_only_accessible.unwrap_or(false);
 
-        let stream =
-            commit_restricted_paths::find_nested_restricted_roots(&changeset, filter_roots).await?;
+        let stream = commit_restricted_paths::find_nested_restricted_roots(
+            &changeset,
+            filter_roots,
+            check_permissions,
+            return_only_accessible,
+        )
+        .await?;
 
         Ok((
             thrift::CommitFindRestrictedPathsStreamResponse::default(),
