@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use context::CoreContext;
 use fbinit::FacebookInit;
+use mononoke_types::DerivableType;
 use mononoke_types::NonRootMPath;
 use mononoke_types::RepoPath;
 use mononoke_types::RepositoryId;
@@ -20,6 +21,7 @@ use permission_checker::dummy::DummyAclProvider;
 use repo_derived_data::RepoDerivedDataArc;
 use scuba_ext::MononokeScubaSampleBuilder;
 use sql_construct::SqlConstruct;
+use test_repo_factory::TestRepoFactory;
 
 use crate::ManifestId;
 use crate::ManifestType;
@@ -81,7 +83,25 @@ pub(crate) async fn build_test_restricted_paths(
     config: RestrictedPathsConfig,
     acl_provider: Arc<dyn AclProvider>,
 ) -> Result<RestrictedPaths> {
-    let test_repo: MinimalTestRepo = test_repo_factory::build_empty(fb).await?;
+    build_test_restricted_paths_with_options(fb, config, acl_provider, false, true).await
+}
+
+pub(crate) async fn build_test_restricted_paths_with_options(
+    fb: FacebookInit,
+    config: RestrictedPathsConfig,
+    acl_provider: Arc<dyn AclProvider>,
+    use_acl_manifest: bool,
+    acl_manifest_derivation_enabled: bool,
+) -> Result<RestrictedPaths> {
+    let mut factory = TestRepoFactory::new(fb)?;
+    if !acl_manifest_derivation_enabled {
+        factory.with_config_override(|repo_config| {
+            if let Some(dd_config) = repo_config.derived_data_config.get_active_config_mut() {
+                dd_config.types.remove(&DerivableType::AclManifests);
+            }
+        });
+    }
+    let test_repo: MinimalTestRepo = factory.build().await?;
     let repo_derived_data = test_repo.repo_derived_data_arc();
     let repo_id = RepositoryId::new(0);
     let manifest_id_store = Arc::new(
@@ -98,7 +118,7 @@ pub(crate) async fn build_test_restricted_paths(
         config_based,
         acl_provider,
         scuba,
-        false, // use_acl_manifest
+        use_acl_manifest,
         repo_derived_data,
     )
 }

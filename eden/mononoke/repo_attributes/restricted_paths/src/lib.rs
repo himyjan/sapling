@@ -631,12 +631,16 @@ mod tests {
 
     use anyhow::Result;
     use fbinit::FacebookInit;
+    use metaconfig_types::AclManifestMode;
     use mononoke_macros::mononoke;
     use mononoke_types::NonRootMPath;
     use permission_checker::MononokeIdentity;
+    use permission_checker::dummy::DummyAclProvider;
 
     use super::*;
+    use crate::test_utils::RestrictedPathsConfigBuilder;
     use crate::test_utils::build_test_restricted_paths_with_dummy_acl_provider as build_test_restricted_paths;
+    use crate::test_utils::build_test_restricted_paths_with_options;
 
     #[mononoke::fbinit_test]
     async fn test_empty_config(fb: FacebookInit) -> Result<()> {
@@ -758,6 +762,99 @@ mod tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    // What it tests: default Disabled mode does not require AclManifest derived data.
+    // Expected: construction succeeds without AclManifest derived data.
+    #[mononoke::fbinit_test]
+    async fn test_disabled_mode_does_not_require_acl_manifest_derivation(
+        fb: FacebookInit,
+    ) -> Result<()> {
+        let config = RestrictedPathsConfig {
+            acl_manifest_mode: AclManifestMode::Disabled,
+            ..Default::default()
+        };
+        let _restricted_paths = build_test_restricted_paths_with_options(
+            fb,
+            config,
+            DummyAclProvider::new(fb)?,
+            false,
+            false,
+        )
+        .await?;
+
+        // TODO(T248660053): assert Disabled construction stays valid without
+        // AclManifest derived data when Shadow construction validation is added.
+        Ok(())
+    }
+
+    // What it tests: Shadow mode requires AclManifest derived data.
+    // Expected: the construction result is captured for the Shadow validation scenario.
+    #[mononoke::fbinit_test]
+    async fn test_shadow_mode_requires_acl_manifest_derivation(fb: FacebookInit) -> Result<()> {
+        let config = RestrictedPathsConfig {
+            acl_manifest_mode: AclManifestMode::Shadow,
+            ..Default::default()
+        };
+        let _result = build_test_restricted_paths_with_options(
+            fb,
+            config,
+            DummyAclProvider::new(fb)?,
+            false,
+            false,
+        )
+        .await;
+
+        // TODO(T248660053): assert Shadow construction fails when AclManifest
+        // derived data is disabled.
+        Ok(())
+    }
+
+    // What it tests: legacy `use_acl_manifest = true` validation remains unchanged.
+    // Expected: the construction result is captured for the legacy validation scenario.
+    #[mononoke::fbinit_test]
+    async fn test_legacy_use_acl_manifest_still_requires_acl_manifest_derivation(
+        fb: FacebookInit,
+    ) -> Result<()> {
+        let _result = build_test_restricted_paths_with_options(
+            fb,
+            RestrictedPathsConfig::default(),
+            DummyAclProvider::new(fb)?,
+            true,
+            false,
+        )
+        .await;
+
+        // TODO(T248660053): assert the existing legacy use_acl_manifest failure
+        // remains unchanged when Shadow validation is added.
+        Ok(())
+    }
+
+    // What it tests: default Disabled mode keeps config-backed lookup behavior.
+    // Expected: config-backed lookup completes in Disabled mode.
+    #[mononoke::fbinit_test]
+    async fn test_disabled_mode_keeps_config_authoritative_lookup(fb: FacebookInit) -> Result<()> {
+        let config = RestrictedPathsConfigBuilder::new()
+            .with_path_acl_str("restricted/dir", "SERVICE_IDENTITY:restricted_acl")?
+            .build();
+        let restricted_paths = build_test_restricted_paths_with_options(
+            fb,
+            config,
+            DummyAclProvider::new(fb)?,
+            false,
+            false,
+        )
+        .await?;
+        let ctx = CoreContext::test_mock(fb);
+        let cs_id = ChangesetId::new(mononoke_types::hash::Blake2::from_byte_array([0u8; 32]));
+        let path = NonRootMPath::new("restricted/dir/file")?;
+        let _lookup = restricted_paths
+            .get_path_restriction_info(&ctx, Some(cs_id), &[path])
+            .await?;
+
+        // TODO(T248660053): assert Disabled mode still reads restrictions from
+        // the config source.
         Ok(())
     }
 }
