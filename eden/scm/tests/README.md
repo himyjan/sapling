@@ -144,10 +144,10 @@ Test with commit graph:
 
 | Target | Environment | When to Use |
 |--------|-------------|-------------|
-| `hg_run_tests` | Plain Sapling (no EdenFS, no Watchman) | Default: pure Sapling logic changes |
-| `hg_edenfs_run_tests` | With EdenFS (`HGTEST_USE_EDEN=1`) | Changes affecting EdenFS integration |
-| `hg_watchman_run_tests` | With Watchman filesystem monitoring | Changes affecting fsmonitor/status |
-| `hg_mononoke_run_tests` | With Mononoke server backend | Changes affecting remote repo interaction |
+| `sl_run_tests` | Plain Sapling (no EdenFS, no Watchman) | Default: pure Sapling logic changes |
+| `sl_edenfs_run_tests` | With EdenFS (`HGTEST_USE_EDEN=1`) | Changes affecting EdenFS integration |
+| `sl_watchman_run_tests` | With Watchman filesystem monitoring | Changes affecting fsmonitor/status |
+| `sl_mononoke_run_tests` | With Mononoke server backend | Changes affecting remote repo interaction |
 
 ## Running .t Tests
 
@@ -156,7 +156,7 @@ Test with commit graph:
 buck run @fbcode//mode/opt fbcode//eden/scm:hg -- .t tests/test-foo.t
 
 # Via Buck:
-buck test fbcode//eden/scm/tests:hg_run_tests -- test_foo_t
+buck test fbcode//eden/scm/tests:sl_run_tests -- test_foo_t
 ```
 
 ## Updating Expected Output (Autofix)
