@@ -20,6 +20,9 @@ use futures::TryStreamExt;
 use manifest::Entry;
 use manifest::ManifestOps;
 use manifest::PathOrPrefix;
+use mercurial_types::HgAugmentedManifestEnvelope;
+use mercurial_types::HgAugmentedManifestId;
+use mercurial_types::fetch_augmented_manifest_envelope_opt;
 use mononoke_types::ChangesetId;
 use mononoke_types::MPath;
 use mononoke_types::NonRootMPath;
@@ -297,6 +300,46 @@ pub(crate) async fn get_manifest_restriction_info_from_config(
         .collect())
 }
 
+/// Lookup restriction info for a manifest access through the AclManifest source.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "implemented before Shadow logging wires this source"
+    )
+)]
+pub(crate) async fn get_manifest_restriction_info_from_acl_manifest(
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    manifest_id: &ManifestId,
+    manifest_type: &ManifestType,
+) -> Result<Vec<ManifestRestrictionInfo>> {
+    let Some(acl_manifest_directory_id) = load_acl_manifest_directory_id_from_manifest(
+        restricted_paths,
+        ctx,
+        manifest_id,
+        manifest_type,
+    )
+    .await?
+    else {
+        return Ok(vec![]);
+    };
+
+    let blobstore = restricted_paths
+        .repo_derived_data
+        .manager()
+        .repo_blobstore();
+    let acl_manifest =
+        load_acl_manifest_directory(ctx, blobstore, acl_manifest_directory_id).await?;
+
+    match acl_manifest.restriction {
+        AclManifestDirectoryRestriction::Restricted(ref restriction) => Ok(vec![
+            load_manifest_restriction_info(ctx, blobstore, restriction).await?,
+        ]),
+        AclManifestDirectoryRestriction::Unrestricted => Ok(vec![]),
+    }
+}
+
 fn get_config_path_restriction_info_for_path(
     restricted_paths: &RestrictedPaths,
     path: &NonRootMPath,
@@ -462,6 +505,20 @@ async fn load_acl_entry_blob_fields(
     Ok((repo_region_acl, request_acl))
 }
 
+async fn load_manifest_restriction_info(
+    ctx: &CoreContext,
+    blobstore: &impl blobstore::KeyedBlobstore,
+    restriction: &AclManifestRestriction,
+) -> Result<ManifestRestrictionInfo> {
+    let (repo_region_acl, request_acl) =
+        load_acl_entry_blob_fields(ctx, blobstore, restriction).await?;
+    Ok(ManifestRestrictionInfo {
+        restriction_root: None,
+        repo_region_acl,
+        request_acl,
+    })
+}
+
 async fn load_path_restriction_info(
     ctx: &CoreContext,
     blobstore: &impl blobstore::KeyedBlobstore,
@@ -489,13 +546,37 @@ fn build_config_path_restriction_info(
     }
 }
 
-/// Lookup restriction info for a manifest access through the AclManifest source.
-#[expect(dead_code, reason = "interface skeleton for the split stack")]
-pub(crate) async fn get_manifest_restriction_info_from_acl_manifest(
-    _restricted_paths: &RestrictedPaths,
-    _ctx: &CoreContext,
-    _manifest_id: &ManifestId,
-    _manifest_type: &ManifestType,
-) -> Result<Vec<ManifestRestrictionInfo>> {
-    unimplemented!("implemented by the follow-up extraction diff")
+async fn load_acl_manifest_directory_id_from_manifest(
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    manifest_id: &ManifestId,
+    manifest_type: &ManifestType,
+) -> Result<Option<AclManifestId>> {
+    let ManifestType::HgAugmented = manifest_type else {
+        // TODO(T248660053): remove this after deprecating access through other
+        // manifest types.
+        return Ok(None);
+    };
+
+    let hg_augmented_manifest_id =
+        HgAugmentedManifestId::from_bytes(manifest_id.as_inner().as_slice())
+            .with_context(|| format!("Failed to parse HgAugmented manifest id {manifest_id}"))?;
+    let blobstore = restricted_paths
+        .repo_derived_data
+        .manager()
+        .repo_blobstore();
+    let Some(envelope): Option<HgAugmentedManifestEnvelope> =
+        fetch_augmented_manifest_envelope_opt(ctx, blobstore, hg_augmented_manifest_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to load HgAugmentedManifest envelope for manifest type {} id {}",
+                    manifest_type, manifest_id
+                )
+            })?
+    else {
+        return Ok(None);
+    };
+
+    Ok(envelope.augmented_manifest.acl_manifest_directory_id)
 }

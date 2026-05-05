@@ -39,9 +39,11 @@ use scuba_ext::MononokeScubaSampleBuilder;
 use sql_construct::SqlConstruct;
 use tests_utils::CreateCommitContext;
 
+use super::ManifestRestrictionInfo;
 use super::PathRestrictionInfo;
 use super::find_restricted_descendants_from_acl_manifest;
 use super::get_exact_path_restriction_from_acl_manifest;
+use super::get_manifest_restriction_info_from_acl_manifest;
 use super::get_path_restriction_info_from_acl_manifest;
 use crate::ManifestId;
 use crate::ManifestType;
@@ -68,10 +70,6 @@ struct AclManifestLookupFixture {
     cs_id: ChangesetId,
 }
 
-#[expect(
-    dead_code,
-    reason = "placeholder tests build this fixture before assertions"
-)]
 struct ManifestLookupFixture {
     ctx: CoreContext,
     restricted_paths: RestrictedPaths,
@@ -199,7 +197,7 @@ mod hg_augmented_manifest_lookup {
         let restriction_root = "manifest_restricted";
         let repo_region_acl = "REPO_REGION:repos/hg/fbsource/=manifest_restricted";
         let request_acl = "GROUP:manifest_restricted_requests";
-        let _fixture = hg_augmented_manifest_lookup_fixture(
+        let fixture = hg_augmented_manifest_lookup_fixture(
             fb,
             vec![
                 (
@@ -212,8 +210,22 @@ mod hg_augmented_manifest_lookup {
             ManifestType::HgAugmented,
         )
         .await?;
-        // TODO: call get_manifest_restriction_info_from_acl_manifest and assert that it returns
-        // the restriction stored in the target HgAugmented manifest's acl_manifest_directory_id.
+        let results = get_manifest_restriction_info_from_acl_manifest(
+            &fixture.restricted_paths,
+            &fixture.ctx,
+            &fixture.manifest_id,
+            &fixture.manifest_type,
+        )
+        .await?;
+
+        assert_eq!(
+            results,
+            vec![ManifestRestrictionInfo {
+                restriction_root: None,
+                repo_region_acl: repo_region_acl.to_string(),
+                request_acl: request_acl.to_string(),
+            }],
+        );
         Ok(())
     }
 
@@ -221,15 +233,22 @@ mod hg_augmented_manifest_lookup {
     async fn test_hg_augmented_manifest_lookup_skips_unrestricted_manifest(
         fb: FacebookInit,
     ) -> Result<()> {
-        let _fixture = hg_augmented_manifest_lookup_fixture(
+        let fixture = hg_augmented_manifest_lookup_fixture(
             fb,
             vec![("unrestricted/file.txt", b"content".to_vec())],
             None,
             ManifestType::HgAugmented,
         )
         .await?;
-        // TODO: call get_manifest_restriction_info_from_acl_manifest and assert that a manifest
-        // without an acl_manifest_directory_id returns no restrictions.
+        let results = get_manifest_restriction_info_from_acl_manifest(
+            &fixture.restricted_paths,
+            &fixture.ctx,
+            &fixture.manifest_id,
+            &fixture.manifest_type,
+        )
+        .await?;
+
+        assert_eq!(results, vec![]);
         Ok(())
     }
 
@@ -237,18 +256,26 @@ mod hg_augmented_manifest_lookup {
     async fn test_hg_augmented_manifest_lookup_skips_unsupported_manifest_type(
         fb: FacebookInit,
     ) -> Result<()> {
-        let _fixture = hg_augmented_manifest_lookup_fixture(
+        let fixture = hg_augmented_manifest_lookup_fixture(
             fb,
             vec![("unsupported/file.txt", b"content".to_vec())],
             None,
             ManifestType::Hg,
         )
         .await?;
-        // TODO: call get_manifest_restriction_info_from_acl_manifest and assert that unsupported
-        // manifest types are skipped by the AclManifest comparison source.
+        let results = get_manifest_restriction_info_from_acl_manifest(
+            &fixture.restricted_paths,
+            &fixture.ctx,
+            &fixture.manifest_id,
+            &fixture.manifest_type,
+        )
+        .await?;
+
+        assert_eq!(results, vec![]);
         Ok(())
     }
 }
+
 async fn acl_manifest_lookup_fixture(
     fb: FacebookInit,
     files: Vec<(&'static str, Vec<u8>)>,
