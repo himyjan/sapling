@@ -245,10 +245,11 @@ void InodeAccessLogger::processInodeAccessEvents() {
       // task can flush this cache to Scuba. This would make it possible to
       // increase the InodeAccessesPercentage without overwhelming Scribe.
 
-      // Gate on enableXplatLogger config:
+      // Gate on enableXplatLoggerFileAccess config:
       // true  → XplatLogger Thrift path (Compact Protocol + ScribeD RPC)
       // false → StructuredLogger/scribe_cat path (existing behavior)
-      if (reloadableConfig_->getEdenConfig()->enableXplatLogger.getValue() &&
+      if (reloadableConfig_->getEdenConfig()
+              ->enableXplatLoggerFileAccess.getValue() &&
           xplatLogger_ != nullptr) {
         edenStats_->increment(&TelemetryStats::fileAccessViaXplatLogger);
         logFileAccessViaXplat(repo, directory, filename, source, sourceDetail);

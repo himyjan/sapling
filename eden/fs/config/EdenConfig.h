@@ -1513,11 +1513,11 @@ class EdenConfig : private ConfigSettingManager {
       this};
 
   /**
-   * Whether to enable XplatLogger for telemetry.
+   * Whether to enable XplatLogger for file access telemetry.
    * Only used in the CLI, including here to get rid of warnings.
    */
-  ConfigSetting<bool> enableXplatLogger{
-      "telemetry:enable-xplatlogger",
+  ConfigSetting<bool> enableXplatLoggerFileAccess{
+      "telemetry:enable-xplatlogger-fileaccess",
       false,
       this};
 

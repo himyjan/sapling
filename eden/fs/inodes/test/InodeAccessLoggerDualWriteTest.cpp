@@ -85,15 +85,15 @@ class InodeAccessLoggerDualWriteTest : public ::testing::Test {
   }
 
   std::unique_ptr<InodeAccessLogger> createLogger(
-      bool enableXplatLogger,
+      bool enableXplatLoggerFileAccess,
       std::shared_ptr<SpyStructuredLogger> spyLogger,
       XplatLogger* xplatLogger = nullptr) {
     auto config = EdenConfig::createTestEdenConfig();
     config->logFileAccesses.setValue(true, ConfigSourceType::UserConfig, true);
     config->logFileAccessesSamplingDenominator.setValue(
         1, ConfigSourceType::UserConfig, true);
-    config->enableXplatLogger.setValue(
-        enableXplatLogger, ConfigSourceType::UserConfig, true);
+    config->enableXplatLoggerFileAccess.setValue(
+        enableXplatLoggerFileAccess, ConfigSourceType::UserConfig, true);
 
     auto reloadableConfig =
         std::make_shared<ReloadableConfig>(std::move(config));

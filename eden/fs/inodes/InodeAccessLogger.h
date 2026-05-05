@@ -72,7 +72,7 @@ class InodeAccessLogger {
    * Logs a file access event via the XplatLogger Thrift path (Compact
    * Protocol
    * + StructuredProducerService RPC to local ScribeD). Gated by the
-   * enableXplatLogger config flag.
+   * enableXplatLoggerFileAccess config flag.
    */
   void logFileAccessViaXplat(
       folly::StringPiece repo,
