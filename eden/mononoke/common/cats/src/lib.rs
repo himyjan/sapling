@@ -111,7 +111,7 @@ fn extract_identity_from_token(
     if tdata.verifierIdentity.id_type != verifier_identity.id_type
         || tdata.verifierIdentity.id_data != verifier_identity.id_data
     {
-        warn!(
+        debug!(
             "CAT token skipped: verifier identity mismatch (token has {}:{}, expected {}:{})",
             tdata.verifierIdentity.id_type,
             tdata.verifierIdentity.id_data,
