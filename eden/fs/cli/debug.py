@@ -1384,8 +1384,7 @@ class LogCmd(Subcmd):
     def upload_logs(
         self, args: argparse.Namespace, instance: EdenInstance, eden_log_path: Path
     ) -> int:
-        # For ease of use, just use the same rage reporter
-        rage_processor = instance.get_config_value("rage.reporter", default="")
+        rage_processor = rage_mod.get_rage_reporter(instance)
 
         # pyre-fixme[24]: Generic type `subprocess.Popen` expects 1 type parameter.
         proc: Optional[subprocess.Popen] = None

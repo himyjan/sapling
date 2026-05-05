@@ -15,6 +15,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -129,6 +130,11 @@ class IOWithRedaction:
 
     def flush(self) -> None:
         self.wrapped.flush()
+
+
+def get_rage_reporter(instance: EdenInstance) -> str:
+    processor = instance.get_config_value("rage.reporter", default="")
+    return processor.format(hostname=socket.getfqdn())
 
 
 THRIFT_COUNTER_REGEX = (
@@ -375,7 +381,7 @@ def print_diagnostic_info(
     print_build_info(out, host, instance)
     print_host_dashboard(out, host)
 
-    processor = instance.get_config_value("rage.reporter", default="")
+    processor = get_rage_reporter(instance)
     get_eden_logs(out, processor, instance, dry_run)
 
     print_watchman_log(out, processor, dry_run)
