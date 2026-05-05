@@ -22,6 +22,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use context::CoreContext;
+use metaconfig_types::AclManifestMode;
 use metaconfig_types::RestrictedPathsConfig;
 use mononoke_macros::mononoke;
 use mononoke_types::ChangesetId;
@@ -98,6 +99,15 @@ impl RestrictedPaths {
                     .config()
                     .is_enabled(DerivableType::AclManifests),
                 "use_acl_manifest is true but AclManifest derivation is not enabled for this repo. \
+                 Enable AclManifests in the repo's derived data config."
+            );
+        }
+        if config_based.config().acl_manifest_mode == AclManifestMode::Shadow {
+            anyhow::ensure!(
+                repo_derived_data
+                    .config()
+                    .is_enabled(DerivableType::AclManifests),
+                "acl_manifest_mode is Shadow but AclManifest derivation is not enabled for this repo. \
                  Enable AclManifests in the repo's derived data config."
             );
         }
@@ -784,20 +794,19 @@ mod tests {
         )
         .await?;
 
-        // TODO(T248660053): assert Disabled construction stays valid without
-        // AclManifest derived data when Shadow construction validation is added.
+        assert!(!_restricted_paths.has_restricted_paths());
         Ok(())
     }
 
     // What it tests: Shadow mode requires AclManifest derived data.
-    // Expected: the construction result is captured for the Shadow validation scenario.
+    // Expected: construction fails with a clear configuration error.
     #[mononoke::fbinit_test]
     async fn test_shadow_mode_requires_acl_manifest_derivation(fb: FacebookInit) -> Result<()> {
         let config = RestrictedPathsConfig {
             acl_manifest_mode: AclManifestMode::Shadow,
             ..Default::default()
         };
-        let _result = build_test_restricted_paths_with_options(
+        let result = build_test_restricted_paths_with_options(
             fb,
             config,
             DummyAclProvider::new(fb)?,
@@ -806,18 +815,23 @@ mod tests {
         )
         .await;
 
-        // TODO(T248660053): assert Shadow construction fails when AclManifest
-        // derived data is disabled.
+        let err = result.err().ok_or_else(|| {
+            anyhow::anyhow!(
+                "expected Shadow construction to fail when AclManifest derivation is disabled"
+            )
+        })?;
+        assert_error_chain_contains(&err, "acl_manifest_mode is Shadow");
+        assert_error_chain_contains(&err, "AclManifest derivation is not enabled");
         Ok(())
     }
 
     // What it tests: legacy `use_acl_manifest = true` validation remains unchanged.
-    // Expected: the construction result is captured for the legacy validation scenario.
+    // Expected: the legacy failure remains independent from Shadow-mode validation.
     #[mononoke::fbinit_test]
     async fn test_legacy_use_acl_manifest_still_requires_acl_manifest_derivation(
         fb: FacebookInit,
     ) -> Result<()> {
-        let _result = build_test_restricted_paths_with_options(
+        let result = build_test_restricted_paths_with_options(
             fb,
             RestrictedPathsConfig::default(),
             DummyAclProvider::new(fb)?,
@@ -826,13 +840,18 @@ mod tests {
         )
         .await;
 
-        // TODO(T248660053): assert the existing legacy use_acl_manifest failure
-        // remains unchanged when Shadow validation is added.
+        let err = result.err().ok_or_else(|| {
+            anyhow::anyhow!(
+                "expected legacy use_acl_manifest construction to fail when AclManifest derivation is disabled"
+            )
+        })?;
+        assert_error_chain_contains(&err, "use_acl_manifest is true");
+        assert_error_chain_contains(&err, "AclManifest derivation is not enabled");
         Ok(())
     }
 
     // What it tests: default Disabled mode keeps config-backed lookup behavior.
-    // Expected: config-backed lookup completes in Disabled mode.
+    // Expected: the config source remains authoritative in Disabled mode.
     #[mononoke::fbinit_test]
     async fn test_disabled_mode_keeps_config_authoritative_lookup(fb: FacebookInit) -> Result<()> {
         let config = RestrictedPathsConfigBuilder::new()
@@ -849,12 +868,19 @@ mod tests {
         let ctx = CoreContext::test_mock(fb);
         let cs_id = ChangesetId::new(mononoke_types::hash::Blake2::from_byte_array([0u8; 32]));
         let path = NonRootMPath::new("restricted/dir/file")?;
-        let _lookup = restricted_paths
+        let lookup = restricted_paths
             .get_path_restriction_info(&ctx, Some(cs_id), &[path])
             .await?;
 
-        // TODO(T248660053): assert Disabled mode still reads restrictions from
-        // the config source.
+        assert_eq!(lookup.len(), 1);
+        assert_eq!(lookup[0].repo_region_acl, "SERVICE_IDENTITY:restricted_acl");
         Ok(())
+    }
+
+    fn assert_error_chain_contains(err: &anyhow::Error, needle: &str) {
+        assert!(
+            err.chain().any(|err| err.to_string().contains(needle)),
+            "error chain should contain '{needle}', got: {err:?}"
+        );
     }
 }
