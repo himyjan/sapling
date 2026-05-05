@@ -55,18 +55,7 @@ pub use crate::access_log::has_read_access_to_repo_region_acls;
 use crate::access_log::is_member_of_groups;
 use crate::access_log::log_access_to_restricted_path;
 pub use crate::restriction_info::ManifestRestrictionInfo;
-/// Core restriction information for a path.
-/// Does not include access check results — that is the API layer's concern
-/// (see `mononoke_api::PathAccessInfo`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct PathRestrictionInfo {
-    /// The root path of this restriction (directory containing `.slacl`).
-    pub restriction_root: NonRootMPath,
-    /// The repo region ACL string, e.g. "REPO_REGION:repos/hg/fbsource/=project1".
-    pub repo_region_acl: String,
-    /// ACL for requesting access. Defaults to repo_region_acl if not configured.
-    pub request_acl: String,
-}
+pub use crate::restriction_info::PathRestrictionInfo;
 
 #[derive(Debug)]
 pub enum RestrictedPathAccessType<'a> {
@@ -183,19 +172,9 @@ impl RestrictedPaths {
         paths: &[NonRootMPath],
     ) -> Result<Vec<PathRestrictionInfo>> {
         if !self.use_acl_manifest {
-            return Ok(paths
-                .iter()
-                .filter_map(|path| {
-                    self.config_based.get_acl_for_path(path).map(|acl| {
-                        let repo_region_acl = acl.to_string();
-                        PathRestrictionInfo {
-                            restriction_root: path.clone(),
-                            request_acl: repo_region_acl.clone(),
-                            repo_region_acl,
-                        }
-                    })
-                })
-                .collect());
+            return Ok(restriction_info::get_exact_path_restriction_from_config(
+                self, paths,
+            ));
         }
 
         let cs_id =
@@ -220,24 +199,9 @@ impl RestrictedPaths {
         paths: &[NonRootMPath],
     ) -> Result<Vec<PathRestrictionInfo>> {
         if !self.use_acl_manifest {
-            return Ok(paths
-                .iter()
-                .flat_map(|path| {
-                    self.config()
-                        .path_acls
-                        .iter()
-                        .filter(|(prefix, _)| prefix.is_prefix_of(path))
-                        .map(|(prefix, acl)| {
-                            let repo_region_acl = acl.to_string();
-                            PathRestrictionInfo {
-                                restriction_root: prefix.clone(),
-                                request_acl: repo_region_acl.clone(),
-                                repo_region_acl,
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect());
+            return Ok(restriction_info::get_path_restriction_info_from_config(
+                self, paths,
+            ));
         }
 
         let cs_id =
@@ -305,27 +269,9 @@ impl RestrictedPaths {
         roots: Vec<MPath>,
     ) -> Result<Vec<PathRestrictionInfo>> {
         if !self.use_acl_manifest {
-            let mut results: Vec<PathRestrictionInfo> = self
-                .config()
-                .path_acls
-                .iter()
-                .filter(|(root, _)| {
-                    roots
-                        .iter()
-                        .any(|query_root| query_root.is_prefix_of(*root))
-                })
-                .map(|(root, acl)| {
-                    let repo_region_acl = acl.to_string();
-                    PathRestrictionInfo {
-                        restriction_root: root.clone(),
-                        request_acl: repo_region_acl.clone(),
-                        repo_region_acl,
-                    }
-                })
-                .collect();
-            results.sort_by(|a, b| a.restriction_root.cmp(&b.restriction_root));
-            results.dedup_by(|a, b| a.restriction_root == b.restriction_root);
-            return Ok(results);
+            return Ok(restriction_info::find_restricted_descendants_from_config(
+                self, &roots,
+            ));
         }
 
         let cs_id =
