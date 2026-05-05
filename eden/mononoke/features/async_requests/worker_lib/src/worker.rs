@@ -50,6 +50,7 @@ use mononoke_app::MononokeReposManager;
 use mononoke_macros::mononoke;
 use mononoke_types::RepositoryId;
 use mononoke_types::Timestamp;
+use rand::RngExt as _;
 use stats::define_stats;
 use stats::prelude::*;
 use tracing::debug;
@@ -95,6 +96,8 @@ const DEQUEUE_STREAM_SLEEP_TIME: u64 = 1000;
 // if it hasn't updated inprogress timestamp
 const ABANDONED_REQUEST_THRESHOLD_SECS: i64 = 5 * 60;
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const CONCURRENCY_LIMIT_BACKOFF_BASE: Duration = Duration::from_secs(15);
+const CONCURRENCY_LIMIT_BACKOFF_MAX_JITTER_SECS: u64 = 15;
 
 define_stats! {
     prefix = "async_requests.worker";
@@ -373,6 +376,11 @@ impl AsyncMethodRequestWorker {
         release_ondemand_repo_impl(repo_id, &self.ondemand_repo_refs, &self.repos_mgr);
     }
 
+    fn concurrency_limit_backoff() -> Duration {
+        let jitter_secs = rand::rng().random_range(0..=CONCURRENCY_LIMIT_BACKOFF_MAX_JITTER_SECS);
+        CONCURRENCY_LIMIT_BACKOFF_BASE + Duration::from_secs(jitter_secs)
+    }
+
     /// Params into stored response. Doesn't mark it as "in progress" (as this is done during dequeueing).
     /// Returns true if the result was successfully stored. Returns false if we
     /// lost the race (the request table was updated).
@@ -415,17 +423,23 @@ impl AsyncMethodRequestWorker {
             root_request_id,
             created_by.as_deref(),
         );
-        log_start(&ctx);
 
         // Check concurrency limit for this request type. If exceeded,
-        // requeue so another worker can try later when capacity frees up.
+        // hold the claim briefly before requeueing so the same hot request
+        // does not immediately churn across the whole worker fleet.
         match self.queue.concurrency_limit_reached(&ctx, &req_id.1).await {
             Ok(true) => {
                 let row_id = req_id.0;
+                let backoff = Self::concurrency_limit_backoff();
                 info!(
-                    "[{}] Concurrency limit reached for {}, requeuing",
-                    &row_id, &req_id.1.0,
+                    "[{}] Concurrency limit reached for {}, backing off for {:?}",
+                    &row_id, &req_id.1.0, backoff,
                 );
+                ctx.scuba()
+                    .clone()
+                    .add("backoff_ms", backoff.as_millis() as i64)
+                    .log_with_msg("Request throttled by concurrency limit", None);
+                tokio::time::sleep(backoff).await;
                 if let Err(requeue_err) = self.queue.requeue(&ctx, req_id).await {
                     error!(
                         "[{}] Failed to requeue request after concurrency limit: {:?}",
@@ -440,6 +454,8 @@ impl AsyncMethodRequestWorker {
             }
             _ => {}
         }
+
+        log_start(&ctx);
 
         // Save refs for cleanup after self is partially moved.
         let ondemand_repo_refs = self.ondemand_repo_refs.clone();
