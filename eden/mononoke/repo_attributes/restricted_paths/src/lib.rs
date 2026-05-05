@@ -11,6 +11,8 @@
 //! and to store the manifest ids of these paths from every revision.
 
 mod access_log;
+pub(crate) mod restriction_check;
+pub(crate) mod restriction_info;
 
 #[cfg(test)]
 mod test_utils;
@@ -52,6 +54,7 @@ pub use crate::access_log::RestrictionCheckResult;
 pub use crate::access_log::has_read_access_to_repo_region_acls;
 use crate::access_log::is_member_of_groups;
 use crate::access_log::log_access_to_restricted_path;
+pub use crate::restriction_info::ManifestRestrictionInfo;
 /// Core restriction information for a path.
 /// Does not include access check results — that is the API layer's concern
 /// (see `mononoke_api::PathAccessInfo`).
