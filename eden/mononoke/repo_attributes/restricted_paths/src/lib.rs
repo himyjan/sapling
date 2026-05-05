@@ -17,30 +17,17 @@ pub(crate) mod restriction_info;
 #[cfg(test)]
 mod test_utils;
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use acl_manifest::RootAclManifestId;
 use anyhow::Context;
 use anyhow::Result;
-use blobstore::Loadable;
 use context::CoreContext;
-use derivation_queue_thrift::DerivationPriority;
-use futures::StreamExt;
-use futures::TryStreamExt;
-use manifest::Entry;
-use manifest::ManifestOps;
-use manifest::PathOrPrefix;
 use metaconfig_types::RestrictedPathsConfig;
 use mononoke_macros::mononoke;
 use mononoke_types::ChangesetId;
 use mononoke_types::DerivableType;
 use mononoke_types::MPath;
 use mononoke_types::NonRootMPath;
-use mononoke_types::acl_manifest::AclManifestDirectoryRestriction;
-use mononoke_types::acl_manifest::AclManifestEntryBlob;
-use mononoke_types::acl_manifest::AclManifestRestriction;
-use mononoke_types::typed_hash::AclManifestId;
 use permission_checker::AclProvider;
 use repo_derived_data::ArcRepoDerivedData;
 pub use restricted_paths_common::*;
@@ -182,15 +169,8 @@ impl RestrictedPaths {
 
         let cs_id =
             cs_id.context("ChangesetId is required for ACL manifest-based restriction lookup")?;
-        let root_id = self.derive_acl_manifest(ctx, cs_id).await?;
-        let blobstore = self.repo_derived_data().manager().repo_blobstore();
-        Self::find_restrictions_at_paths(
-            ctx,
-            blobstore,
-            root_id.into_inner_id(),
-            paths.iter().map(|p| MPath::from(p.clone())).collect(),
-        )
-        .await
+        restriction_info::get_exact_path_restriction_from_acl_manifest(self, ctx, cs_id, paths)
+            .await
     }
 
     /// Get restriction info for one or more paths, considering ancestor restrictions.
@@ -209,32 +189,7 @@ impl RestrictedPaths {
 
         let cs_id =
             cs_id.context("ChangesetId is required for ACL manifest-based restriction lookup")?;
-        let root_id = self.derive_acl_manifest(ctx, cs_id).await?;
-        let blobstore = self.repo_derived_data().manager().repo_blobstore();
-
-        // Generate all prefixes for each path and deduplicate.
-        // For a/b/c/d -> [a, a/b, a/b/c, a/b/c/d]
-        // BTreeSet ensures shared prefixes across multiple paths are only queried once.
-        let all_prefixes: BTreeSet<MPath> = paths
-            .iter()
-            .flat_map(|path| {
-                path.into_iter()
-                    .scan(None::<NonRootMPath>, |acc, element| {
-                        let next = NonRootMPath::join_opt_element(acc.as_ref(), element);
-                        *acc = Some(next.clone());
-                        Some(MPath::from(next))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        Self::find_restrictions_at_paths(
-            ctx,
-            blobstore,
-            root_id.into_inner_id(),
-            all_prefixes.into_iter().collect(),
-        )
-        .await
+        restriction_info::get_path_restriction_info_from_acl_manifest(self, ctx, cs_id, paths).await
     }
 
     /// Check if a path is itself a restriction root (exact match).
@@ -279,12 +234,8 @@ impl RestrictedPaths {
 
         let cs_id =
             cs_id.context("ChangesetId is required for ACL manifest-based restriction lookup")?;
-        let mut results = self
-            .find_restricted_descendants_from_manifest(ctx, cs_id, roots)
-            .await?;
-        results.sort_by(|a, b| a.restriction_root.cmp(&b.restriction_root));
-        results.dedup_by(|a, b| a.restriction_root == b.restriction_root);
-        Ok(results)
+        restriction_info::find_restricted_descendants_from_acl_manifest(self, ctx, cs_id, roots)
+            .await
     }
 
     // -----------------------------------------------------------------------
@@ -399,165 +350,6 @@ impl RestrictedPaths {
             vec!["manifest_db".to_string()],
         )
         .await
-    }
-
-    // -----------------------------------------------------------------------
-    // Private helpers — ACL manifest derivation and tree walking
-    // -----------------------------------------------------------------------
-
-    fn repo_derived_data(&self) -> &ArcRepoDerivedData {
-        &self.repo_derived_data
-    }
-
-    /// Derive the root ACL manifest id for a given changeset.
-    async fn derive_acl_manifest(
-        &self,
-        ctx: &CoreContext,
-        cs_id: ChangesetId,
-    ) -> Result<RootAclManifestId> {
-        self.repo_derived_data()
-            .derive::<RootAclManifestId>(ctx, cs_id, DerivationPriority::LOW)
-            .await
-            .map_err(anyhow::Error::from)
-    }
-
-    /// Load restriction info from an `AclManifestRestriction` entry blob.
-    async fn load_restriction_info(
-        ctx: &CoreContext,
-        blobstore: &impl blobstore::KeyedBlobstore,
-        restriction: &AclManifestRestriction,
-        restriction_root: NonRootMPath,
-    ) -> Result<PathRestrictionInfo> {
-        // TODO(T248660053): Consider inlining the ACL name in AclManifestDirectoryEntry
-        // to avoid a second blobstore roundtrip when only the ACL name is needed.
-        let entry_blob: AclManifestEntryBlob = restriction
-            .entry_blob_id
-            .load(ctx, blobstore)
-            .await
-            .context("Failed to load AclManifestEntryBlob")?;
-        let repo_region_acl = entry_blob.repo_region_acl;
-        let request_acl = entry_blob
-            .permission_request_group
-            .unwrap_or_else(|| repo_region_acl.clone());
-        Ok(PathRestrictionInfo {
-            restriction_root,
-            repo_region_acl,
-            request_acl,
-        })
-    }
-
-    /// Given an AclManifestId and exact paths, find which ones are restricted
-    /// directories. Uses `find_entries` for a single efficient tree traversal.
-    /// Blobstore loads are parallelized with `buffered`.
-    async fn find_restrictions_at_paths<S>(
-        ctx: &CoreContext,
-        blobstore: &S,
-        root_id: AclManifestId,
-        paths: Vec<MPath>,
-    ) -> Result<Vec<PathRestrictionInfo>>
-    where
-        S: blobstore::KeyedBlobstore + Clone + Send + Sync + 'static,
-    {
-        root_id
-            .find_entries(
-                ctx.clone(),
-                blobstore.clone(),
-                paths.into_iter().map(PathOrPrefix::Path),
-            )
-            .map(|entry_result| {
-                let ctx = ctx.clone();
-                let blobstore = blobstore.clone();
-                async move {
-                    let (path, entry) = entry_result?;
-                    match entry {
-                        Entry::Tree(manifest_id) => {
-                            let non_root = match NonRootMPath::try_from(path) {
-                                Ok(p) => p,
-                                Err(_) => return Ok(None), // skip root path
-                            };
-                            let manifest = manifest_id
-                                .load(&ctx, &blobstore)
-                                .await
-                                .context("Failed to load AclManifest directory")?;
-                            match manifest.restriction {
-                                AclManifestDirectoryRestriction::Restricted(ref restriction) => {
-                                    let info = Self::load_restriction_info(
-                                        &ctx,
-                                        &blobstore,
-                                        restriction,
-                                        non_root,
-                                    )
-                                    .await?;
-                                    Ok(Some(info))
-                                }
-                                AclManifestDirectoryRestriction::Unrestricted => Ok(None),
-                            }
-                        }
-                        Entry::Leaf(_) => Ok(None),
-                    }
-                }
-            })
-            .buffered(100)
-            .try_filter_map(|info| async move { Ok(info) })
-            .try_collect()
-            .await
-    }
-
-    /// Find all restriction roots under the given root paths using the ACL manifest.
-    /// Passes roots as PathOrPrefix::Prefix to find_entries for efficient subtree traversal.
-    async fn find_restricted_descendants_from_manifest(
-        &self,
-        ctx: &CoreContext,
-        cs_id: ChangesetId,
-        roots: Vec<MPath>,
-    ) -> Result<Vec<PathRestrictionInfo>> {
-        let root_id = self.derive_acl_manifest(ctx, cs_id).await?;
-        let blobstore = self.repo_derived_data().manager().repo_blobstore();
-
-        root_id
-            .into_inner_id()
-            .find_entries(
-                ctx.clone(),
-                blobstore.clone(),
-                roots.into_iter().map(PathOrPrefix::Prefix),
-            )
-            .map(|entry_result| {
-                let ctx = ctx.clone();
-                let blobstore = blobstore.clone();
-                async move {
-                    let (path, entry) = entry_result?;
-                    match entry {
-                        Entry::Tree(manifest_id) => {
-                            let non_root = match NonRootMPath::try_from(path) {
-                                Ok(p) => p,
-                                Err(_) => return Ok(None), // skip root path
-                            };
-                            let manifest = manifest_id
-                                .load(&ctx, &blobstore)
-                                .await
-                                .context("Failed to load AclManifest directory")?;
-                            match manifest.restriction {
-                                AclManifestDirectoryRestriction::Restricted(ref restriction) => {
-                                    let info = Self::load_restriction_info(
-                                        &ctx,
-                                        &blobstore,
-                                        restriction,
-                                        non_root,
-                                    )
-                                    .await?;
-                                    Ok(Some(info))
-                                }
-                                AclManifestDirectoryRestriction::Unrestricted => Ok(None),
-                            }
-                        }
-                        Entry::Leaf(_) => Ok(None),
-                    }
-                }
-            })
-            .buffered(100)
-            .try_filter_map(|info| async move { Ok(info) })
-            .try_collect()
-            .await
     }
 
     /// Check if any client identity matches the enforcement conditions config.

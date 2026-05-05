@@ -17,6 +17,8 @@ use fbinit::FacebookInit;
 use filestore::FilestoreConfig;
 use mononoke_macros::mononoke;
 use mononoke_types::ChangesetId;
+use mononoke_types::MPath;
+use mononoke_types::NonRootMPath;
 use mononoke_types::RepositoryId;
 use permission_checker::dummy::DummyAclProvider;
 use repo_blobstore::RepoBlobstore;
@@ -27,6 +29,10 @@ use scuba_ext::MononokeScubaSampleBuilder;
 use sql_construct::SqlConstruct;
 use tests_utils::CreateCommitContext;
 
+use super::PathRestrictionInfo;
+use super::find_restricted_descendants_from_acl_manifest;
+use super::get_exact_path_restriction_from_acl_manifest;
+use super::get_path_restriction_info_from_acl_manifest;
 use crate::RestrictedPaths;
 use crate::RestrictedPathsConfig;
 use crate::RestrictedPathsConfigBased;
@@ -44,10 +50,6 @@ struct AclManifestLookupTestRepo(
     RepoIdentity,
 );
 
-#[expect(
-    dead_code,
-    reason = "placeholder tests build this fixture before assertions"
-)]
 struct AclManifestLookupFixture {
     ctx: CoreContext,
     restricted_paths: RestrictedPaths,
@@ -59,8 +61,9 @@ mod acl_manifest_path_lookup {
 
     #[mononoke::fbinit_test]
     async fn test_exact_path_lookup_finds_restriction_root(fb: FacebookInit) -> Result<()> {
+        let restriction_root = "restricted";
         let repo_region_acl = "REPO_REGION:repos/hg/fbsource/=restricted";
-        let _fixture = acl_manifest_lookup_fixture(
+        let fixture = acl_manifest_lookup_fixture(
             fb,
             vec![
                 ("restricted/.slacl", slacl(repo_region_acl)),
@@ -68,15 +71,31 @@ mod acl_manifest_path_lookup {
             ],
         )
         .await?;
-        // TODO(T248658346): Call the AclManifest exact path lookup and assert it returns the restricted root.
+        let results = get_exact_path_restriction_from_acl_manifest(
+            &fixture.restricted_paths,
+            &fixture.ctx,
+            fixture.cs_id,
+            &[NonRootMPath::new(restriction_root)?],
+        )
+        .await?;
+
+        assert_eq!(
+            results,
+            vec![PathRestrictionInfo {
+                restriction_root: NonRootMPath::new(restriction_root)?,
+                repo_region_acl: repo_region_acl.to_string(),
+                request_acl: repo_region_acl.to_string(),
+            }],
+        );
         Ok(())
     }
 
     #[mononoke::fbinit_test]
     async fn test_ancestor_path_lookup_finds_parent_restriction(fb: FacebookInit) -> Result<()> {
+        let restriction_root = "restricted";
         let lookup_path = "restricted/child/file.txt";
         let repo_region_acl = "REPO_REGION:repos/hg/fbsource/=restricted_parent";
-        let _fixture = acl_manifest_lookup_fixture(
+        let fixture = acl_manifest_lookup_fixture(
             fb,
             vec![
                 ("restricted/.slacl", slacl(repo_region_acl)),
@@ -84,15 +103,33 @@ mod acl_manifest_path_lookup {
             ],
         )
         .await?;
-        // TODO(T248658346): Call the AclManifest ancestor lookup and assert it returns the parent restriction.
+        let results = get_path_restriction_info_from_acl_manifest(
+            &fixture.restricted_paths,
+            &fixture.ctx,
+            fixture.cs_id,
+            &[NonRootMPath::new(lookup_path)?],
+        )
+        .await?;
+
+        assert_eq!(
+            results,
+            vec![PathRestrictionInfo {
+                restriction_root: NonRootMPath::new(restriction_root)?,
+                repo_region_acl: repo_region_acl.to_string(),
+                request_acl: repo_region_acl.to_string(),
+            }],
+        );
         Ok(())
     }
 
     #[mononoke::fbinit_test]
     async fn test_descendant_lookup_finds_restricted_children(fb: FacebookInit) -> Result<()> {
+        let lookup_root = "project";
+        let first_restriction_root = "project/first";
         let first_repo_region_acl = "REPO_REGION:repos/hg/fbsource/=first";
+        let second_restriction_root = "project/second";
         let second_repo_region_acl = "REPO_REGION:repos/hg/fbsource/=second";
-        let _fixture = acl_manifest_lookup_fixture(
+        let fixture = acl_manifest_lookup_fixture(
             fb,
             vec![
                 ("project/first/.slacl", slacl(first_repo_region_acl)),
@@ -102,7 +139,29 @@ mod acl_manifest_path_lookup {
             ],
         )
         .await?;
-        // TODO(T248658346): Call the AclManifest descendant lookup and assert it returns the restricted children.
+        let results = find_restricted_descendants_from_acl_manifest(
+            &fixture.restricted_paths,
+            &fixture.ctx,
+            fixture.cs_id,
+            vec![MPath::from(NonRootMPath::new(lookup_root)?)],
+        )
+        .await?;
+
+        assert_eq!(
+            results,
+            vec![
+                PathRestrictionInfo {
+                    restriction_root: NonRootMPath::new(first_restriction_root)?,
+                    repo_region_acl: first_repo_region_acl.to_string(),
+                    request_acl: first_repo_region_acl.to_string(),
+                },
+                PathRestrictionInfo {
+                    restriction_root: NonRootMPath::new(second_restriction_root)?,
+                    repo_region_acl: second_repo_region_acl.to_string(),
+                    request_acl: second_repo_region_acl.to_string(),
+                },
+            ],
+        );
         Ok(())
     }
 }

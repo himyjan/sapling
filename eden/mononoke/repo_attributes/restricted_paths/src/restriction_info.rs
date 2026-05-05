@@ -7,11 +7,27 @@
 
 //! Low-level restriction lookup primitives.
 
+use std::collections::BTreeSet;
+
+use acl_manifest::RootAclManifestId;
+use anyhow::Context;
 use anyhow::Result;
+use blobstore::Loadable;
 use context::CoreContext;
+use derivation_queue_thrift::DerivationPriority;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use manifest::Entry;
+use manifest::ManifestOps;
+use manifest::PathOrPrefix;
 use mononoke_types::ChangesetId;
 use mononoke_types::MPath;
 use mononoke_types::NonRootMPath;
+use mononoke_types::acl_manifest::AclManifest;
+use mononoke_types::acl_manifest::AclManifestDirectoryRestriction;
+use mononoke_types::acl_manifest::AclManifestEntryBlob;
+use mononoke_types::acl_manifest::AclManifestRestriction;
+use mononoke_types::typed_hash::AclManifestId;
 use permission_checker::MononokeIdentity;
 
 use crate::ManifestId;
@@ -91,6 +107,69 @@ pub(crate) fn find_restricted_descendants_from_config(
     results.sort_by(|left, right| left.restriction_root.cmp(&right.restriction_root));
     results.dedup_by(|left, right| left.restriction_root == right.restriction_root);
     results
+}
+
+/// Get exact AclManifest restriction info for one or more paths.
+pub(crate) async fn get_exact_path_restriction_from_acl_manifest(
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    cs_id: ChangesetId,
+    paths: &[NonRootMPath],
+) -> Result<Vec<PathRestrictionInfo>> {
+    let root_id = derive_acl_manifest(restricted_paths, ctx, cs_id).await?;
+    let blobstore = restricted_paths
+        .repo_derived_data
+        .manager()
+        .repo_blobstore();
+    find_restrictions_at_paths_from_acl_manifest(
+        ctx,
+        blobstore,
+        root_id.into_inner_id(),
+        paths.iter().cloned().map(MPath::from).collect(),
+    )
+    .await
+}
+
+/// Get AclManifest restriction info for one or more paths, considering ancestors.
+pub(crate) async fn get_path_restriction_info_from_acl_manifest(
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    cs_id: ChangesetId,
+    paths: &[NonRootMPath],
+) -> Result<Vec<PathRestrictionInfo>> {
+    let root_id = derive_acl_manifest(restricted_paths, ctx, cs_id).await?;
+    let blobstore = restricted_paths
+        .repo_derived_data
+        .manager()
+        .repo_blobstore();
+    find_restrictions_at_paths_from_acl_manifest(
+        ctx,
+        blobstore,
+        root_id.into_inner_id(),
+        collect_path_prefixes(paths),
+    )
+    .await
+}
+
+/// Find AclManifest restriction roots that are descendants of the given roots.
+pub(crate) async fn find_restricted_descendants_from_acl_manifest(
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    cs_id: ChangesetId,
+    roots: Vec<MPath>,
+) -> Result<Vec<PathRestrictionInfo>> {
+    let root_id = derive_acl_manifest(restricted_paths, ctx, cs_id).await?;
+    let blobstore = restricted_paths
+        .repo_derived_data
+        .manager()
+        .repo_blobstore();
+    find_restricted_descendants_from_acl_manifest_root(
+        ctx,
+        blobstore,
+        root_id.into_inner_id(),
+        roots,
+    )
+    .await
 }
 
 /// Get manifest-id-store paths for a manifest access through the config-backed source.
@@ -229,6 +308,173 @@ fn get_config_path_restriction_info_for_path(
         .filter(|(prefix, _)| prefix.is_prefix_of(path))
         .map(|(prefix, acl)| build_config_path_restriction_info(prefix.clone(), acl))
         .collect()
+}
+
+async fn derive_acl_manifest(
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    cs_id: ChangesetId,
+) -> Result<RootAclManifestId> {
+    restricted_paths
+        .repo_derived_data
+        .derive::<RootAclManifestId>(ctx, cs_id, DerivationPriority::LOW)
+        .await
+        .map_err(anyhow::Error::from)
+}
+
+fn collect_path_prefixes(paths: &[NonRootMPath]) -> Vec<MPath> {
+    paths
+        .iter()
+        .flat_map(|path| {
+            path.into_iter()
+                .scan(None::<NonRootMPath>, |acc, element| {
+                    let next = NonRootMPath::join_opt_element(acc.as_ref(), element);
+                    *acc = Some(next.clone());
+                    Some(MPath::from(next))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+async fn find_restrictions_at_paths_from_acl_manifest<S>(
+    ctx: &CoreContext,
+    blobstore: &S,
+    root_id: AclManifestId,
+    paths: Vec<MPath>,
+) -> Result<Vec<PathRestrictionInfo>>
+where
+    S: blobstore::KeyedBlobstore + Clone + Send + Sync + 'static,
+{
+    let mut results = root_id
+        .find_entries(
+            ctx.clone(),
+            blobstore.clone(),
+            paths.into_iter().map(PathOrPrefix::Path),
+        )
+        .map(|entry_result| {
+            let ctx = ctx.clone();
+            let blobstore = blobstore.clone();
+            async move {
+                let (path, entry) = entry_result?;
+                resolve_tree_entry_restriction(&ctx, &blobstore, path, entry).await
+            }
+        })
+        .buffer_unordered(100)
+        .try_filter_map(|info| async move { Ok(info) })
+        .try_collect()
+        .await?;
+    sort_and_dedup_path_restriction_info(&mut results);
+    Ok(results)
+}
+
+async fn find_restricted_descendants_from_acl_manifest_root<S>(
+    ctx: &CoreContext,
+    blobstore: &S,
+    root_id: AclManifestId,
+    roots: Vec<MPath>,
+) -> Result<Vec<PathRestrictionInfo>>
+where
+    S: blobstore::KeyedBlobstore + Clone + Send + Sync + 'static,
+{
+    let mut results = root_id
+        .find_entries(
+            ctx.clone(),
+            blobstore.clone(),
+            roots.into_iter().map(PathOrPrefix::Prefix),
+        )
+        .map(|entry_result| {
+            let ctx = ctx.clone();
+            let blobstore = blobstore.clone();
+            async move {
+                let (path, entry) = entry_result?;
+                resolve_tree_entry_restriction(&ctx, &blobstore, path, entry).await
+            }
+        })
+        .buffer_unordered(100)
+        .try_filter_map(|info| async move { Ok(info) })
+        .try_collect()
+        .await?;
+    sort_and_dedup_path_restriction_info(&mut results);
+    Ok(results)
+}
+
+fn sort_and_dedup_path_restriction_info(results: &mut Vec<PathRestrictionInfo>) {
+    results.sort_by(|left, right| left.restriction_root.cmp(&right.restriction_root));
+    results.dedup_by(|left, right| left.restriction_root == right.restriction_root);
+}
+
+async fn resolve_tree_entry_restriction<S, LeafId>(
+    ctx: &CoreContext,
+    blobstore: &S,
+    path: MPath,
+    entry: Entry<AclManifestId, LeafId>,
+) -> Result<Option<PathRestrictionInfo>>
+where
+    S: blobstore::KeyedBlobstore + Clone + Send + Sync + 'static,
+{
+    match entry {
+        Entry::Tree(manifest_id) => {
+            let restriction_root = match NonRootMPath::try_from(path) {
+                Ok(path) => path,
+                Err(_) => return Ok(None),
+            };
+            let acl_manifest = load_acl_manifest_directory(ctx, blobstore, manifest_id).await?;
+            match acl_manifest.restriction {
+                AclManifestDirectoryRestriction::Restricted(ref restriction) => Ok(Some(
+                    load_path_restriction_info(ctx, blobstore, restriction, restriction_root)
+                        .await?,
+                )),
+                AclManifestDirectoryRestriction::Unrestricted => Ok(None),
+            }
+        }
+        Entry::Leaf(_) => Ok(None),
+    }
+}
+
+async fn load_acl_manifest_directory(
+    ctx: &CoreContext,
+    blobstore: &impl blobstore::KeyedBlobstore,
+    acl_manifest_id: AclManifestId,
+) -> Result<AclManifest> {
+    acl_manifest_id
+        .load(ctx, blobstore)
+        .await
+        .context("Failed to load AclManifest directory")
+}
+
+async fn load_acl_entry_blob_fields(
+    ctx: &CoreContext,
+    blobstore: &impl blobstore::KeyedBlobstore,
+    restriction: &AclManifestRestriction,
+) -> Result<(String, String)> {
+    let entry_blob: AclManifestEntryBlob = restriction
+        .entry_blob_id
+        .load(ctx, blobstore)
+        .await
+        .context("Failed to load AclManifestEntryBlob")?;
+    let repo_region_acl = entry_blob.repo_region_acl;
+    let request_acl = entry_blob
+        .permission_request_group
+        .unwrap_or_else(|| repo_region_acl.clone());
+    Ok((repo_region_acl, request_acl))
+}
+
+async fn load_path_restriction_info(
+    ctx: &CoreContext,
+    blobstore: &impl blobstore::KeyedBlobstore,
+    restriction: &AclManifestRestriction,
+    restriction_root: NonRootMPath,
+) -> Result<PathRestrictionInfo> {
+    let (repo_region_acl, request_acl) =
+        load_acl_entry_blob_fields(ctx, blobstore, restriction).await?;
+    Ok(PathRestrictionInfo {
+        restriction_root,
+        repo_region_acl,
+        request_acl,
+    })
 }
 
 fn build_config_path_restriction_info(
