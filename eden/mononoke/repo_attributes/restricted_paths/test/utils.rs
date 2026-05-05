@@ -31,6 +31,7 @@ use maplit::hashmap;
 use mercurial_derivation::RootHgAugmentedManifestId;
 use mercurial_derivation::derive_hg_changeset::DeriveHgChangeset;
 use mercurial_types::HgAugmentedManifestId;
+use metaconfig_types::AclManifestMode;
 use metaconfig_types::RestrictedPathsConfig;
 use metadata::Metadata;
 use mononoke_api::MononokeError;
@@ -38,6 +39,7 @@ use mononoke_api::Repo as TestRepo;
 use mononoke_api::RepoContext;
 use mononoke_api_hg::HgDataId;
 use mononoke_api_hg::RepoContextHgExt;
+use mononoke_types::ChangesetId;
 use mononoke_types::MPath;
 use mononoke_types::NonRootMPath;
 use mononoke_types::RepositoryId;
@@ -62,6 +64,14 @@ use tests_utils::CreateCommitContext;
 
 pub const TEST_CLIENT_MAIN_ID: &str = "user:myusername0";
 
+#[expect(
+    dead_code,
+    reason = "path dispatch assertions use returned Scuba rows in the next diff"
+)]
+pub struct RestrictedPathsScenarioResult {
+    pub scuba_logs: Vec<ScubaAccessLogSample>,
+}
+
 pub struct RestrictedPathsTestData {
     pub ctx: CoreContext,
     // The changes that should be made in the test's commit. Each entry represents
@@ -76,8 +86,12 @@ pub struct RestrictedPathsTestData {
     /// For each scenario, a new repo is built with those condition enforcement
     /// ACLs and the `should_enforce_restriction method is called to verify behavior.
     enforcement_scenarios: Vec<(Vec<MononokeIdentity>, bool)>,
-    /// Common fields needed to rebuild repos for enforcement scenarios
-    restricted_paths_config: Vec<(NonRootMPath, MononokeIdentity)>,
+    /// Config-backed restrictions written into `RestrictedPathsConfig.path_acls`.
+    config_restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    /// AclManifest-backed restrictions materialized as `.slacl` files.
+    acl_manifest_restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    acl_manifest_mode: AclManifestMode,
+    use_acl_manifest: bool,
     /// Repo regions config for recreating ACLs: (region_name, usernames)
     repo_regions_config: Vec<(String, Vec<String>)>,
     groups_config: Vec<(String, Vec<String>)>,
@@ -85,7 +99,10 @@ pub struct RestrictedPathsTestData {
 }
 
 pub struct RestrictedPathsTestDataBuilder {
-    restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    config_restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    acl_manifest_restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    acl_manifest_mode: AclManifestMode,
+    use_acl_manifest: bool,
     tooling_allowlist_group: Option<String>,
     /// Store the repo regions config for recreating ACLs in enforcement scenarios
     repo_regions_config: Vec<(String, Vec<String>)>,
@@ -119,6 +136,40 @@ pub struct ScubaAccessLogSample {
     acl_manifest_error: Option<String>,
     shadow_mismatch: Option<bool>,
     shadow_mismatch_detail: Option<String>,
+}
+
+#[expect(
+    dead_code,
+    reason = "path dispatch assertions use Scuba sample accessors in the next diff"
+)]
+impl ScubaAccessLogSample {
+    pub fn full_path(&self) -> Option<&NonRootMPath> {
+        self.full_path.as_ref()
+    }
+
+    pub fn has_authorization(&self) -> bool {
+        self.has_authorization
+    }
+
+    pub fn acl_manifest_mode(&self) -> Option<&str> {
+        self.acl_manifest_mode.as_deref()
+    }
+
+    pub fn shadow_mismatch(&self) -> Option<bool> {
+        self.shadow_mismatch
+    }
+
+    pub fn shadow_mismatch_detail(&self) -> Option<&str> {
+        self.shadow_mismatch_detail.as_deref()
+    }
+
+    pub fn acl_manifest_error(&self) -> Option<&str> {
+        self.acl_manifest_error.as_deref()
+    }
+
+    pub fn considered_restricted_by(&self) -> &[String] {
+        &self.considered_restricted_by
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -220,7 +271,10 @@ impl ScubaAccessLogSampleBuilder {
         self
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "not every Scuba sample builder test sets source attribution"
+    )]
     pub fn with_considered_restricted_by(mut self, considered_restricted_by: Vec<String>) -> Self {
         self.considered_restricted_by = considered_restricted_by;
         self
@@ -263,7 +317,10 @@ impl ScubaAccessLogSampleBuilder {
 impl RestrictedPathsTestDataBuilder {
     pub fn new() -> Self {
         Self {
-            restricted_paths: vec![],
+            config_restricted_paths: vec![],
+            acl_manifest_restricted_paths: vec![],
+            acl_manifest_mode: AclManifestMode::Disabled,
+            use_acl_manifest: true,
             tooling_allowlist_group: None,
             groups_config: vec![],
             repo_regions_config: vec![],
@@ -279,7 +336,34 @@ impl RestrictedPathsTestDataBuilder {
         mut self,
         restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
     ) -> Self {
-        self.restricted_paths = restricted_paths;
+        self.config_restricted_paths = restricted_paths.clone();
+        self.acl_manifest_restricted_paths = restricted_paths;
+        self
+    }
+
+    pub fn with_config_restricted_paths(
+        mut self,
+        restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    ) -> Self {
+        self.config_restricted_paths = restricted_paths;
+        self
+    }
+
+    pub fn with_acl_manifest_restricted_paths(
+        mut self,
+        restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    ) -> Self {
+        self.acl_manifest_restricted_paths = restricted_paths;
+        self
+    }
+
+    pub fn with_acl_manifest_mode(mut self, acl_manifest_mode: AclManifestMode) -> Self {
+        self.acl_manifest_mode = acl_manifest_mode;
+        self
+    }
+
+    pub fn with_use_acl_manifest(mut self, use_acl_manifest: bool) -> Self {
+        self.use_acl_manifest = use_acl_manifest;
         self
     }
 
@@ -413,7 +497,10 @@ impl RestrictedPathsTestDataBuilder {
             expected_manifest_entries: self.expected_manifest_entries,
             expected_scuba_logs: self.expected_scuba_logs,
             enforcement_scenarios: self.enforcement_scenarios,
-            restricted_paths_config: self.restricted_paths,
+            config_restricted_paths: self.config_restricted_paths,
+            acl_manifest_restricted_paths: self.acl_manifest_restricted_paths,
+            acl_manifest_mode: self.acl_manifest_mode,
+            use_acl_manifest: self.use_acl_manifest,
             repo_regions_config: self.repo_regions_config,
             groups_config: self.groups_config,
             tooling_allowlist_group: self.tooling_allowlist_group,
@@ -452,6 +539,65 @@ impl RestrictedPathsTestData {
         Ok(())
     }
 
+    /// Runs the standard access scenario and returns the Scuba rows it emitted.
+    pub async fn observe_restricted_paths_scenario(
+        &self,
+        conditional_enforcement_acls: &[MononokeIdentity],
+    ) -> Result<RestrictedPathsScenarioResult> {
+        self.run_restricted_paths_test_inner(0, conditional_enforcement_acls, false)
+            .await
+    }
+
+    /// Calls path-based restricted paths logging directly and returns emitted Scuba rows.
+    pub async fn observe_path_access(
+        &self,
+        path: NonRootMPath,
+        cs_id: Option<ChangesetId>,
+        conditional_enforcement_acls: &[MononokeIdentity],
+    ) -> Result<RestrictedPathsScenarioResult> {
+        let temp_log_file = tempfile::NamedTempFile::new()?;
+        let temp_log_path = temp_log_file.into_temp_path().keep()?;
+
+        let groups_config: Vec<(&str, Vec<&str>)> = self
+            .groups_config
+            .iter()
+            .map(|(group, users)| (group.as_str(), users.iter().map(|u| u.as_str()).collect()))
+            .collect();
+        let acls = if !self.repo_regions_config.is_empty() {
+            let config_refs: Vec<(&str, Vec<&str>)> = self
+                .repo_regions_config
+                .iter()
+                .map(|(region, users)| {
+                    (region.as_str(), users.iter().map(|u| u.as_str()).collect())
+                })
+                .collect();
+            setup_test_acls_with_groups(config_refs, groups_config)?
+        } else {
+            default_test_acls(groups_config)?
+        };
+        let scenario_repo = setup_test_repo(
+            &self.ctx,
+            self.config_restricted_paths.clone(),
+            self.acl_manifest_mode,
+            self.use_acl_manifest,
+            self.tooling_allowlist_group.clone(),
+            acls,
+            temp_log_path.clone(),
+            conditional_enforcement_acls,
+        )
+        .await?;
+
+        scenario_repo
+            .restricted_paths()
+            .log_access_by_path_if_restricted(&self.ctx, path, cs_id)
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        Ok(RestrictedPathsScenarioResult {
+            scuba_logs: deserialize_scuba_log_file(&temp_log_path)?,
+        })
+    }
+
     /// Run restricted paths testing for a single scenario.
     /// Creates a repo with the given conditional enforcement ACLs and runs all access operations.
     /// If expect_enforcement is true, expects an AuthorizationError from the access operations.
@@ -460,7 +606,7 @@ impl RestrictedPathsTestData {
         scenario_idx: usize,
         conditional_enforcement_acls: &[MononokeIdentity],
         expect_enforcement: bool,
-    ) -> Result<()> {
+    ) -> Result<RestrictedPathsScenarioResult> {
         println!(
             "Running scenario {scenario_idx} with expect_enforcement: {expect_enforcement} and conditional_enforcement_acls: {conditional_enforcement_acls:#?}"
         );
@@ -493,7 +639,9 @@ impl RestrictedPathsTestData {
 
         let scenario_repo = setup_test_repo(
             &self.ctx,
-            self.restricted_paths_config.clone(),
+            self.config_restricted_paths.clone(),
+            self.acl_manifest_mode,
+            self.use_acl_manifest,
             self.tooling_allowlist_group.clone(),
             acls,
             temp_log_path.clone(),
@@ -511,7 +659,7 @@ impl RestrictedPathsTestData {
             let file_content = content.as_deref().unwrap_or(path.as_str());
             commit_ctx = commit_ctx.add_file(path.as_str(), file_content.to_string());
         }
-        for (root, acl) in &self.restricted_paths_config {
+        for (root, acl) in &self.acl_manifest_restricted_paths {
             let slacl_path = format!("{}/.slacl", root);
             let slacl_content = format!("repo_region_acl = \"{}\"\n", acl);
             commit_ctx = commit_ctx.add_file(slacl_path.as_str(), slacl_content);
@@ -811,12 +959,12 @@ impl RestrictedPathsTestData {
             assert_eq!(expected_sorted, actual_sorted);
         }
         #[cfg(not(fbcode_build))]
-        let _ = (scuba_logs, &self.expected_scuba_logs);
+        let _ = (&scuba_logs, &self.expected_scuba_logs);
 
         println!(
             "Scenario {scenario_idx} finished SUCCESSFULLY with expect_enforcement: {expect_enforcement} and conditional_enforcement_acls: {conditional_enforcement_acls:#?}"
         );
-        Ok(())
+        Ok(RestrictedPathsScenarioResult { scuba_logs })
     }
 }
 
@@ -906,7 +1054,9 @@ fn setup_acl_file(acls: Acls) -> Result<std::path::PathBuf> {
 
 async fn setup_test_repo(
     ctx: &CoreContext,
-    restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    config_restricted_paths: Vec<(NonRootMPath, MononokeIdentity)>,
+    acl_manifest_mode: AclManifestMode,
+    use_acl_manifest: bool,
     tooling_allowlist_group: Option<String>,
     acls: Acls,
     log_file_path: std::path::PathBuf,
@@ -920,7 +1070,7 @@ async fn setup_test_repo(
     let acl_provider = InternalAclProvider::from_file(&acl_file)
         .with_context(|| format!("Failed to load ACLs from '{}'", acl_file.to_string_lossy()))?;
 
-    let path_acls = restricted_paths.into_iter().collect();
+    let path_acls = config_restricted_paths.into_iter().collect();
 
     let manifest_id_store = Arc::new(
         SqlRestrictedPathsManifestIdStoreBuilder::with_sqlite_in_memory()
@@ -933,6 +1083,7 @@ async fn setup_test_repo(
         use_manifest_id_cache,
         cache_update_interval_ms,
         tooling_allowlist_group,
+        acl_manifest_mode,
         conditional_enforcement_acls: conditional_enforcement_acls.to_vec(),
         ..Default::default()
     };
@@ -968,7 +1119,7 @@ async fn setup_test_repo(
         config_based,
         acl_provider,
         scuba_builder,
-        true, // use_acl_manifest
+        use_acl_manifest,
         repo_derived_data,
     )?);
 

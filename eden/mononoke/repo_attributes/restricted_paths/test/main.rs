@@ -9,7 +9,9 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use fbinit::FacebookInit;
+use metaconfig_types::AclManifestMode;
 use mononoke_macros::mononoke;
+use mononoke_types::ChangesetId;
 use mononoke_types::NonRootMPath;
 use mononoke_types::RepoPath;
 use mononoke_types::RepositoryId;
@@ -2034,5 +2036,124 @@ async fn test_use_acl_manifest_without_derivation_enabled_fails(fb: FacebookInit
         "Error chain should mention AclManifest derivation, got: {err:?}"
     );
 
+    Ok(())
+}
+
+// What it tests: Shadow path dispatch can run config and AclManifest sources side by side.
+// Expected: compact mismatch fields are present while config remains authoritative.
+#[mononoke::fbinit_test]
+async fn test_shadow_path_dispatch_logs_config_and_acl_manifest_sources(
+    fb: FacebookInit,
+) -> Result<()> {
+    let restricted_acl = MononokeIdentity::from_str("REPO_REGION:restricted_acl")?;
+
+    let restricted_root = NonRootMPath::new("restricted/dir")?;
+    let result = RestrictedPathsTestDataBuilder::new()
+        .with_acl_manifest_mode(AclManifestMode::Shadow)
+        .with_use_acl_manifest(false)
+        .with_config_restricted_paths(vec![(restricted_root.clone(), restricted_acl.clone())])
+        .with_acl_manifest_restricted_paths(vec![(restricted_root, restricted_acl)])
+        .with_file_path_changes(vec![("restricted/dir/a", None)])
+        .build(fb)
+        .await?
+        .observe_restricted_paths_scenario(&[])
+        .await?;
+
+    // TODO(T248660053): assert the real path logger emits compact mismatch
+    // fields for Shadow mode.
+    let _ = result;
+    Ok(())
+}
+
+// What it tests: Shadow path dispatch emits comparison rows for AclManifest-only restrictions.
+// Expected: config aggregate fields stay unrestricted while the mismatch summary reports the restriction.
+#[mononoke::fbinit_test]
+async fn test_shadow_path_dispatch_logs_acl_manifest_only_restriction(
+    fb: FacebookInit,
+) -> Result<()> {
+    let restricted_acl = MononokeIdentity::from_str("REPO_REGION:restricted_acl")?;
+
+    let restricted_root = NonRootMPath::new("acl_manifest_only/dir")?;
+    let result = RestrictedPathsTestDataBuilder::new()
+        .with_acl_manifest_mode(AclManifestMode::Shadow)
+        .with_use_acl_manifest(false)
+        .with_acl_manifest_restricted_paths(vec![(restricted_root, restricted_acl)])
+        .with_file_path_changes(vec![("acl_manifest_only/dir/a", None)])
+        .build(fb)
+        .await?
+        .observe_restricted_paths_scenario(&[])
+        .await?;
+
+    // TODO(T248660053): assert AclManifest-only restricted paths emit
+    // comparison rows while config remains authoritative.
+    let _ = result;
+    Ok(())
+}
+
+// What it tests: Shadow path dispatch handles comparison-source lookup errors as logging-only data.
+// Expected: AclManifest errors populate acl_manifest_error without changing request success.
+#[mononoke::fbinit_test]
+async fn test_shadow_path_dispatch_logs_comparison_errors(fb: FacebookInit) -> Result<()> {
+    let restricted_acl = MononokeIdentity::from_str("REPO_REGION:restricted_acl")?;
+
+    let restricted_root = NonRootMPath::new("restricted/dir")?;
+    let missing_cs_id =
+        ChangesetId::from_str("1111111111111111111111111111111111111111111111111111111111111111")?;
+    let result = RestrictedPathsTestDataBuilder::new()
+        .with_acl_manifest_mode(AclManifestMode::Shadow)
+        .with_use_acl_manifest(false)
+        .with_config_restricted_paths(vec![(restricted_root.clone(), restricted_acl)])
+        .build(fb)
+        .await?
+        .observe_path_access(restricted_root, Some(missing_cs_id), &[])
+        .await?;
+
+    // TODO(T248660053): inject an AclManifest path lookup failure and assert
+    // it is logged without failing the request.
+    let _ = result;
+    Ok(())
+}
+
+// What it tests: Shadow path dispatch skips AclManifest comparison when a changeset id is unavailable.
+// Expected: skipped comparison leaves acl_manifest_error and mismatch detail empty.
+#[mononoke::fbinit_test]
+async fn test_shadow_path_dispatch_skips_acl_manifest_without_changeset(
+    fb: FacebookInit,
+) -> Result<()> {
+    let restricted_acl = MononokeIdentity::from_str("REPO_REGION:restricted_acl")?;
+
+    let restricted_root = NonRootMPath::new("restricted/dir")?;
+    let result = RestrictedPathsTestDataBuilder::new()
+        .with_acl_manifest_mode(AclManifestMode::Shadow)
+        .with_use_acl_manifest(false)
+        .with_config_restricted_paths(vec![(restricted_root.clone(), restricted_acl.clone())])
+        .with_acl_manifest_restricted_paths(vec![(restricted_root.clone(), restricted_acl)])
+        .build(fb)
+        .await?
+        .observe_path_access(restricted_root, None, &[])
+        .await?;
+
+    // TODO(T248660053): call path access without a changeset id and assert
+    // AclManifest comparison is skipped.
+    let _ = result;
+    Ok(())
+}
+
+// What it tests: Shadow path dispatch does not log unrestricted rows.
+// Expected: no row is emitted when both sources are unrestricted.
+#[mononoke::fbinit_test]
+async fn test_shadow_path_dispatch_omits_unrestricted_rows(fb: FacebookInit) -> Result<()> {
+    let result = RestrictedPathsTestDataBuilder::new()
+        .with_acl_manifest_mode(AclManifestMode::Shadow)
+        .with_use_acl_manifest(false)
+        .with_file_path_changes(vec![("unrestricted/dir/a", None)])
+        .build(fb)
+        .await?
+        .observe_restricted_paths_scenario(&[])
+        .await?;
+
+    // TODO(T248660053): assert no Scuba rows are emitted when config and
+    // AclManifest both report unrestricted.
+    let _ = result;
     Ok(())
 }
