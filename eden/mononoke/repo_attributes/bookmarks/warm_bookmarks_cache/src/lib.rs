@@ -30,6 +30,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use basename_suffix_skeleton_manifest_v3::RootBssmV3DirectoryId;
 use blame::RootBlameV2;
+use blame::RootBlameV3;
 use bookmarks::ArcBookmarkUpdateLog;
 use bookmarks::ArcBookmarks;
 use bookmarks::BookmarkCategory;
@@ -394,6 +395,11 @@ impl WarmBookmarksCacheBuilder {
                 vec![WarmerTag::Hg, WarmerTag::Git],
             )),
             DerivableType::BlameV2 => Some(create_derived_data_warmer::<RootBlameV2>(
+                &self.ctx,
+                repo_derived_data.clone(),
+                vec![WarmerTag::Hg, WarmerTag::Git],
+            )),
+            DerivableType::BlameV3 => Some(create_derived_data_warmer::<RootBlameV3>(
                 &self.ctx,
                 repo_derived_data.clone(),
                 vec![WarmerTag::Hg, WarmerTag::Git],

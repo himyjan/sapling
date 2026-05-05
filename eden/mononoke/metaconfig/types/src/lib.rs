@@ -649,6 +649,8 @@ pub enum BlameVersion {
     /// Blame v2
     #[default]
     V2,
+    /// Blame v3 (history manifest based)
+    V3,
 }
 
 /// What `GitDeltaManifest` version should be used.

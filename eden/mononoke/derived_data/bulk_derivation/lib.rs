@@ -15,6 +15,7 @@ use anyhow::Error;
 use async_trait::async_trait;
 use basename_suffix_skeleton_manifest_v3::RootBssmV3DirectoryId;
 use blame::RootBlameV2;
+use blame::RootBlameV3;
 use case_conflict_skeleton_manifest::RootCaseConflictSkeletonManifestId;
 use changeset_info::ChangesetInfo;
 use cloned::cloned;
@@ -406,6 +407,7 @@ fn manager_for_type(
     match derived_data_type {
         DerivableType::Unodes => Arc::new(SingleTypeManager::<RootUnodeManifestId>::new(manager)),
         DerivableType::BlameV2 => Arc::new(SingleTypeManager::<RootBlameV2>::new(manager)),
+        DerivableType::BlameV3 => Arc::new(SingleTypeManager::<RootBlameV3>::new(manager)),
         DerivableType::FileNodes => {
             Arc::new(SingleTypeManager::<FilenodesOnlyPublic>::new(manager))
         }

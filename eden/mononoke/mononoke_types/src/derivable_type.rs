@@ -41,6 +41,7 @@ use crate::thrift;
 )]
 pub enum DerivableType {
     BlameV2,
+    BlameV3,
     BssmV3,
     Ccsm,
     ChangesetInfo,
@@ -94,6 +95,7 @@ impl DerivableType {
         // BonsaiDerivable::NAME
         Ok(match s {
             "blame" => DerivableType::BlameV2,
+            "blame_v3" => DerivableType::BlameV3,
             "bssm_v3" => DerivableType::BssmV3,
             "ccsm" => DerivableType::Ccsm,
             "changeset_info" => DerivableType::ChangesetInfo,
@@ -124,6 +126,7 @@ impl DerivableType {
         // BonsaiDerivable::NAME
         match self {
             DerivableType::BlameV2 => "blame",
+            DerivableType::BlameV3 => "blame_v3",
             DerivableType::BssmV3 => "bssm_v3",
             DerivableType::Ccsm => "ccsm",
             DerivableType::ChangesetInfo => "changeset_info",
@@ -151,6 +154,7 @@ impl DerivableType {
     pub fn from_thrift(other: thrift::DerivedDataType) -> Result<Self> {
         Ok(match other {
             thrift::DerivedDataType::BLAME => Self::BlameV2,
+            thrift::DerivedDataType::BLAME_V3 => Self::BlameV3,
             thrift::DerivedDataType::BSSM_V3 => Self::BssmV3,
             thrift::DerivedDataType::CCSM => Self::Ccsm,
             thrift::DerivedDataType::CHANGESET_INFO => Self::ChangesetInfo,
@@ -181,6 +185,7 @@ impl DerivableType {
     pub fn into_thrift(&self) -> thrift::DerivedDataType {
         match self {
             Self::BlameV2 => thrift::DerivedDataType::BLAME,
+            Self::BlameV3 => thrift::DerivedDataType::BLAME_V3,
             Self::BssmV3 => thrift::DerivedDataType::BSSM_V3,
             Self::Ccsm => thrift::DerivedDataType::CCSM,
             Self::ChangesetInfo => thrift::DerivedDataType::CHANGESET_INFO,

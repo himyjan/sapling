@@ -100,6 +100,7 @@ union DerivedData {
   25: DerivedDataDirectoryBranchClusterManifest directory_branch_cluster_manifest;
   26: DerivedDataAclManifest acl_manifest;
   27: DerivedDataHistoryManifest history_manifest;
+  28: DerivedDataBlame blame_v3;
 }
 
 union DerivedDataFsnode {
@@ -127,12 +128,19 @@ union DerivedDataFastlog {
 union DerivedDataBlame {
   // 1: DerivedDataRootBlameV1 was deleted
   2: DerivedDataRootBlameV2 root_blame_v2;
+  3: DerivedDataRootBlameV3 root_blame_v3;
 }
 
 @rust.Exhaustive
 struct DerivedDataRootBlameV2 {
   1: id.ChangesetId changeset_id;
   2: DerivedDataUnode unode;
+}
+
+@rust.Exhaustive
+struct DerivedDataRootBlameV3 {
+  1: id.ChangesetId changeset_id;
+  2: DerivedDataHistoryManifest history_manifest;
 }
 
 union DerivedDataHgChangeset {

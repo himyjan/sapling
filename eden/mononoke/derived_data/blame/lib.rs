@@ -8,10 +8,12 @@
 #![type_length_limit = "1441792"]
 
 mod batch_v2;
+mod batch_v3;
 mod derive_v2;
 mod derive_v3;
 mod fetch;
 mod mapping_v2;
+mod mapping_v3;
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +29,7 @@ pub use fetch::fetch_content_for_blame;
 use manifest::ManifestOps;
 pub use mapping_v2::RootBlameV2;
 pub use mapping_v2::format_key;
+pub use mapping_v3::RootBlameV3;
 use metaconfig_types::BlameVersion;
 use mononoke_types::ChangesetId;
 use mononoke_types::FileUnodeId;
@@ -35,6 +38,8 @@ use mononoke_types::NonRootMPath;
 use mononoke_types::blame_v2::BlameRejected;
 use mononoke_types::blame_v2::BlameV2;
 use mononoke_types::blame_v2::BlameV2Id;
+use mononoke_types::blame_v3::BlameV3Id;
+use mononoke_types::typed_hash::HistoryManifestFileId;
 use repo_blobstore::RepoBlobstoreArc;
 use repo_derived_data::RepoDerivedDataRef;
 use thiserror::Error;
@@ -95,4 +100,29 @@ pub async fn fetch_blame_v2(
         .ok_or(BlameError::IsDirectory(path.into()))?;
     let blame = BlameV2Id::from(file_unode_id).load(ctx, &blobstore).await?;
     Ok((blame, file_unode_id))
+}
+
+/// Fetch the blame for a file using blame V3 (history manifest based).
+/// Blame will be derived if necessary.
+pub async fn fetch_blame_v3(
+    ctx: &CoreContext,
+    repo: &(impl RepoBlobstoreArc + RepoDerivedDataRef + Sync + Send),
+    csid: ChangesetId,
+    path: NonRootMPath,
+) -> Result<(BlameV2, HistoryManifestFileId), BlameError> {
+    let root = repo
+        .repo_derived_data()
+        .derive::<RootBlameV3>(ctx, csid, DerivationPriority::LOW)
+        .await?
+        .root_manifest();
+    let blobstore = repo.repo_blobstore();
+    let hm_file_id = root
+        .into_history_manifest_directory_id()
+        .find_entry(ctx.clone(), blobstore.clone(), path.clone().into())
+        .await?
+        .ok_or_else(|| BlameError::NoSuchPath(path.clone()))?
+        .into_leaf()
+        .ok_or(BlameError::IsDirectory(path.into()))?;
+    let blame = BlameV3Id::from(hm_file_id).load(ctx, &blobstore).await?;
+    Ok((blame, hm_file_id))
 }

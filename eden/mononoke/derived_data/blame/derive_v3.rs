@@ -44,7 +44,6 @@ use mononoke_types::typed_hash::HistoryManifestFileId;
 use crate::DEFAULT_BLAME_FILESIZE_LIMIT;
 use crate::fetch::FetchOutcome;
 
-#[allow(dead_code)]
 pub(crate) async fn derive_blame_v3(
     ctx: &CoreContext,
     derivation_ctx: &DerivationContext,
@@ -107,7 +106,6 @@ pub(crate) async fn derive_blame_v3(
     Ok(())
 }
 
-#[allow(dead_code)]
 async fn create_blame_v3(
     ctx: &CoreContext,
     derivation_ctx: &DerivationContext,
@@ -198,7 +196,6 @@ async fn create_blame_v3(
     store_blame_v3(ctx, blobstore, hm_file_id, blame).await
 }
 
-#[allow(dead_code)]
 enum BlameV3ParentSource {
     /// The source of this blame parent is a file in a parent manifest.
     FileParent {
@@ -210,7 +207,6 @@ enum BlameV3ParentSource {
     ReplacementParent(ChangesetId),
 }
 
-#[allow(dead_code)]
 async fn fetch_blame_parent_v3(
     ctx: &CoreContext,
     derivation_ctx: &DerivationContext,
@@ -256,7 +252,6 @@ async fn fetch_blame_parent_v3(
 }
 
 /// Fetch file content by ContentId, checking size limit and binary content.
-#[allow(dead_code)]
 async fn fetch_content_by_content_id(
     ctx: &CoreContext,
     blobstore: &Arc<dyn KeyedBlobstore>,

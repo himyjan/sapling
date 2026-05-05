@@ -35,6 +35,12 @@ impl RootHistoryManifestDirectoryId {
     }
 }
 
+impl From<HistoryManifestDirectoryId> for RootHistoryManifestDirectoryId {
+    fn from(id: HistoryManifestDirectoryId) -> Self {
+        RootHistoryManifestDirectoryId(id)
+    }
+}
+
 impl TryFrom<BlobstoreBytes> for RootHistoryManifestDirectoryId {
     type Error = Error;
 

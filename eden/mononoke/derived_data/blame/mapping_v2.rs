@@ -17,7 +17,6 @@ use derived_data_manager::DerivableType;
 use derived_data_manager::DerivationContext;
 use derived_data_manager::dependencies;
 use derived_data_service_if as thrift;
-use metaconfig_types::BlameVersion;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::ChangesetId;
 use mononoke_types::ManifestUnodeId;
@@ -65,11 +64,6 @@ impl BonsaiDerivable for RootBlameV2 {
         let root_manifest = derivation_ctx
             .fetch_dependency::<RootUnodeManifestId>(ctx, csid)
             .await?;
-        if derivation_ctx.config().blame_version != BlameVersion::V2 {
-            return Err(anyhow!(
-                "programming error: incorrect blame version (expected V2)"
-            ));
-        }
         derive_blame_v2(ctx, derivation_ctx, bonsai, root_manifest).await?;
         Ok(RootBlameV2 {
             csid,

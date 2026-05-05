@@ -570,6 +570,7 @@ impl Convert for RawDerivedDataTypesConfig {
             None => BlameVersion::default(),
             Some(1) => return Err(anyhow!("blame version 1 has been deprecated")),
             Some(2) => BlameVersion::V2,
+            Some(3) => BlameVersion::V3,
             Some(version) => return Err(anyhow!("unknown blame version {}", version)),
         };
         let git_delta_manifest_version = match self.git_delta_manifest_version {
