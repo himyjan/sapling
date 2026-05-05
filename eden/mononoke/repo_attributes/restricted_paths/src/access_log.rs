@@ -15,12 +15,15 @@ use context::CoreContext;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures::stream;
+use metaconfig_types::AclManifestMode;
 use mononoke_types::NonRootMPath;
 use mononoke_types::RepositoryId;
 use permission_checker::AclProvider;
 use permission_checker::MononokeIdentity;
 use permission_checker::PermissionCheckerBuilder;
 use scuba_ext::MononokeScubaSampleBuilder;
+use serde_json::Value;
+use serde_json::json;
 
 use crate::ManifestId;
 use crate::ManifestType;
@@ -49,13 +52,6 @@ pub(crate) enum RestrictedPathAccessData {
     FullPath { full_path: NonRootMPath },
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "test-only setup before Shadow source logging wires production callers"
-    )
-)]
 pub(crate) type SourceRestrictionResult =
     std::result::Result<Arc<SourceRestrictionCheckResult>, Arc<anyhow::Error>>;
 
@@ -74,7 +70,7 @@ pub(crate) struct SourceRestrictionCheckResult {
     not(test),
     expect(
         dead_code,
-        reason = "test-only setup before Shadow source logging wires production callers"
+        reason = "implemented before Shadow dispatch wires production callers"
     )
 )]
 impl SourceRestrictionCheckResult {
@@ -107,10 +103,6 @@ impl SourceRestrictionCheckResult {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "source logging helper starts using this in the next diff"
-    )]
     fn is_restricted(&self) -> bool {
         !self.restriction_acls.is_empty()
     }
@@ -197,6 +189,286 @@ pub async fn is_part_of_group(
     Ok(membership_checker
         .is_member(ctx.metadata().identities())
         .await)
+}
+
+/// Log compact Shadow comparison results to Scuba.
+///
+/// This emits one row when a Shadow-mode lookup source either finds a
+/// restriction or fails. Aggregate authorization fields remain
+/// config-authoritative, while source disagreement is summarized with compact
+/// mismatch fields. If neither source ran, or every source that ran completed
+/// unrestricted, no row is written.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "implemented before Shadow dispatch wires production callers"
+    )
+)]
+pub(crate) fn log_source_results_to_scuba(
+    ctx: &CoreContext,
+    repo_id: RepositoryId,
+    config_result: Option<&SourceRestrictionResult>,
+    acl_manifest_result: Option<&SourceRestrictionResult>,
+    acl_manifest_mode: AclManifestMode,
+    access_data: RestrictedPathAccessData,
+    mut scuba: MononokeScubaSampleBuilder,
+) -> Result<()> {
+    let any_source_ran = config_result.is_some() || acl_manifest_result.is_some();
+    if !any_source_ran {
+        return Ok(());
+    }
+
+    let any_source_restricted =
+        is_source_restricted(config_result) || is_source_restricted(acl_manifest_result);
+    let any_source_failed = is_source_error(config_result) || is_source_error(acl_manifest_result);
+    if !any_source_restricted && !any_source_failed {
+        return Ok(());
+    }
+
+    scuba.add_metadata(ctx.metadata());
+    scuba.add_common_server_data();
+    scuba.unsampled();
+
+    scuba.add("repo_id", repo_id.id());
+    scuba.add(
+        "acl_manifest_mode",
+        acl_manifest_mode_as_scuba_value(acl_manifest_mode),
+    );
+
+    if let Some(Ok(config)) = config_result {
+        add_aggregate_fields_to_scuba(&mut scuba, config);
+    }
+
+    match access_data {
+        RestrictedPathAccessData::Manifest(manifest_id, manifest_type) => {
+            scuba.add("manifest_id", manifest_id.to_string());
+            scuba.add("manifest_type", manifest_type.to_string());
+        }
+        RestrictedPathAccessData::FullPath { full_path } => {
+            scuba.add("full_path", full_path.to_string());
+        }
+    }
+
+    add_source_error_to_scuba(&mut scuba, SourceKind::Config, config_result);
+    add_source_error_to_scuba(&mut scuba, SourceKind::AclManifest, acl_manifest_result);
+
+    scuba.add(
+        "considered_restricted_by",
+        considered_restricted_by_for_source_results(config_result, acl_manifest_result),
+    );
+    let shadow_mismatch_detail =
+        shadow_mismatch_detail_for_source_results(config_result, acl_manifest_result);
+    scuba.add("shadow_mismatch", shadow_mismatch_detail.is_some());
+    if let Some(shadow_mismatch_detail) = shadow_mismatch_detail {
+        scuba.add("shadow_mismatch_detail", shadow_mismatch_detail);
+    }
+    scuba.log();
+
+    Ok(())
+}
+
+fn add_aggregate_fields_to_scuba(
+    scuba: &mut MononokeScubaSampleBuilder,
+    result: &SourceRestrictionCheckResult,
+) {
+    scuba.add("has_authorization", result.has_authorization);
+    scuba.add("is_allowlisted_tooling", result.is_allowlisted_tooling);
+    scuba.add("is_rollout_allowlisted", result.is_rollout_allowlisted);
+    scuba.add("has_acl_access", result.has_acl_access);
+    scuba.add("acls", acls_to_strings(&result.restriction_acls));
+    if let Some(restriction_paths) = result.restriction_paths.as_deref() {
+        scuba.add("restricted_paths", paths_to_strings(restriction_paths));
+    }
+}
+
+fn add_source_error_to_scuba(
+    scuba: &mut MononokeScubaSampleBuilder,
+    source_kind: SourceKind,
+    result: Option<&SourceRestrictionResult>,
+) {
+    if let Some(Err(err)) = result {
+        scuba.add(source_kind.error_field(), format!("{:#}", err));
+    }
+}
+
+fn considered_restricted_by_for_source_results(
+    config_result: Option<&SourceRestrictionResult>,
+    acl_manifest_result: Option<&SourceRestrictionResult>,
+) -> Vec<String> {
+    [
+        (SourceKind::Config, config_result),
+        (SourceKind::AclManifest, acl_manifest_result),
+    ]
+    .into_iter()
+    .filter(|&(_, result)| is_source_restricted(result))
+    .map(|(source, _)| source.as_scuba_value().to_string())
+    .collect()
+}
+
+fn is_source_restricted(result: Option<&SourceRestrictionResult>) -> bool {
+    matches!(result, Some(Ok(result)) if result.is_restricted())
+}
+
+fn is_source_error(result: Option<&SourceRestrictionResult>) -> bool {
+    matches!(result, Some(Err(_)))
+}
+
+fn shadow_mismatch_detail_for_source_results(
+    config_result: Option<&SourceRestrictionResult>,
+    acl_manifest_result: Option<&SourceRestrictionResult>,
+) -> Option<String> {
+    let differences = shadow_mismatch_differences(config_result, acl_manifest_result);
+    if differences.is_empty() {
+        return None;
+    }
+
+    let mut detail = serde_json::Map::new();
+    if let Some(config_detail) = source_result_detail(config_result) {
+        detail.insert("config".to_string(), config_detail);
+    }
+    if let Some(acl_manifest_detail) = source_result_detail(acl_manifest_result) {
+        detail.insert("acl_manifest".to_string(), acl_manifest_detail);
+    }
+    detail.insert("differences".to_string(), json!(differences));
+    Some(Value::Object(detail).to_string())
+}
+
+fn shadow_mismatch_differences(
+    config_result: Option<&SourceRestrictionResult>,
+    acl_manifest_result: Option<&SourceRestrictionResult>,
+) -> Vec<&'static str> {
+    let error_differences = [
+        (SourceKind::Config, config_result),
+        (SourceKind::AclManifest, acl_manifest_result),
+    ]
+    .into_iter()
+    .filter_map(|(source_kind, result)| {
+        is_source_error(result).then_some(source_kind.error_field())
+    });
+
+    let successful_source_differences = match (
+        successful_source_comparison(config_result),
+        successful_source_comparison(acl_manifest_result),
+    ) {
+        (Some(config), Some(acl_manifest)) => [
+            (config.restricted != acl_manifest.restricted, "restricted"),
+            (
+                config.has_authorization != acl_manifest.has_authorization,
+                "has_authorization",
+            ),
+            (
+                config.restriction_acls != acl_manifest.restriction_acls,
+                "restriction_acls",
+            ),
+            (
+                config.restriction_paths != acl_manifest.restriction_paths,
+                "restriction_paths",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(is_different, field)| is_different.then_some(field))
+        .collect(),
+        _ => Vec::new(),
+    };
+
+    error_differences
+        .chain(successful_source_differences)
+        .collect()
+}
+
+fn source_result_detail(result: Option<&SourceRestrictionResult>) -> Option<Value> {
+    match result? {
+        Ok(result) => Some(json!({
+            "restricted": result.is_restricted(),
+            "has_authorization": result.has_authorization,
+            "restriction_acls": sorted_acls_to_strings(&result.restriction_acls),
+            "restriction_paths": result
+                .restriction_paths
+                .as_deref()
+                .map(sorted_paths_to_strings),
+        })),
+        Err(err) => Some(json!({
+            "error": format!("{:#}", err),
+        })),
+    }
+}
+
+fn successful_source_comparison(
+    result: Option<&SourceRestrictionResult>,
+) -> Option<SourceComparisonData> {
+    let result = match result? {
+        Ok(result) => result,
+        Err(_) => return None,
+    };
+    Some(SourceComparisonData {
+        restricted: result.is_restricted(),
+        has_authorization: result.has_authorization,
+        restriction_acls: sorted_acls_to_strings(&result.restriction_acls),
+        restriction_paths: result
+            .restriction_paths
+            .as_deref()
+            .map(sorted_paths_to_strings),
+    })
+}
+
+fn acls_to_strings(acls: &[MononokeIdentity]) -> Vec<String> {
+    acls.iter().map(ToString::to_string).collect()
+}
+
+fn paths_to_strings(paths: &[NonRootMPath]) -> Vec<String> {
+    paths.iter().map(ToString::to_string).collect()
+}
+
+fn sorted_acls_to_strings(acls: &[MononokeIdentity]) -> Vec<String> {
+    let mut acls = acls_to_strings(acls);
+    acls.sort();
+    acls
+}
+
+fn sorted_paths_to_strings(paths: &[NonRootMPath]) -> Vec<String> {
+    let mut paths = paths_to_strings(paths);
+    paths.sort();
+    paths
+}
+
+fn acl_manifest_mode_as_scuba_value(acl_manifest_mode: AclManifestMode) -> &'static str {
+    match acl_manifest_mode {
+        AclManifestMode::Disabled => "disabled",
+        AclManifestMode::Shadow => "shadow",
+        AclManifestMode::Both => "both",
+        AclManifestMode::Authoritative => "authoritative",
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SourceKind {
+    Config,
+    AclManifest,
+}
+
+impl SourceKind {
+    fn error_field(self) -> &'static str {
+        match self {
+            Self::Config => "config_error",
+            Self::AclManifest => "acl_manifest_error",
+        }
+    }
+
+    fn as_scuba_value(self) -> &'static str {
+        match self {
+            Self::Config => "manifest_db",
+            Self::AclManifest => "acl_manifest",
+        }
+    }
+}
+
+#[derive(Eq, PartialEq)]
+struct SourceComparisonData {
+    restricted: bool,
+    has_authorization: bool,
+    restriction_acls: Vec<String>,
+    restriction_paths: Option<Vec<String>>,
 }
 
 // ============================================================================

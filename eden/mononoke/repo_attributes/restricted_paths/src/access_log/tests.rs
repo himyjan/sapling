@@ -20,10 +20,12 @@ use mononoke_types::RepositoryId;
 use permission_checker::MononokeIdentity;
 use scuba_ext::MononokeScubaSampleBuilder;
 use serde_json::Value;
+use serde_json::json;
 
 use super::RestrictedPathAccessData;
 use super::SourceRestrictionCheckResult;
 use super::SourceRestrictionResult;
+use super::log_source_results_to_scuba;
 use crate::ManifestId;
 use crate::ManifestType;
 
@@ -61,10 +63,6 @@ impl ShadowComparisonFieldFixture {
         })
     }
 
-    #[expect(
-        dead_code,
-        reason = "shadow comparison assertion tests start logging samples in the next diff"
-    )]
     fn log_with(
         self,
         log_results: impl FnOnce(
@@ -106,7 +104,7 @@ impl ShadowComparisonFieldFixture {
 // Expected: source attribution and mismatch summary fields are emitted.
 #[mononoke::fbinit_test]
 async fn test_shadow_mismatch_summary_fields_are_logged(fb: FacebookInit) -> Result<()> {
-    let fixture = ShadowComparisonFieldFixture::new(
+    let samples = ShadowComparisonFieldFixture::new(
         fb,
         Some(restricted_result(
             false,
@@ -121,11 +119,50 @@ async fn test_shadow_mismatch_summary_fields_are_logged(fb: FacebookInit) -> Res
             Some("acl_manifest/restricted"),
         )?),
         full_path_access_data()?,
-    )?;
+    )?
+    .log_with(log_source_results_to_scuba)?;
 
-    observe_fixture_shape(fixture);
-    // TODO(T248660053): assert shadow_mismatch, shadow_mismatch_detail,
-    // acl_manifest_mode, and considered_restricted_by.
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(
+        sample_field(sample, "acl_manifest_mode"),
+        Some("shadow".to_string())
+    );
+    assert_eq!(
+        sample_field(sample, "shadow_mismatch"),
+        Some("true".to_string())
+    );
+    assert_eq!(
+        sample_array(sample, "considered_restricted_by"),
+        vec!["manifest_db".to_string(), "acl_manifest".to_string()]
+    );
+
+    let detail = sample_json_field(sample, "shadow_mismatch_detail")?
+        .ok_or_else(|| anyhow!("missing shadow_mismatch_detail"))?;
+    assert_eq!(
+        detail["differences"],
+        json!(["has_authorization", "restriction_acls", "restriction_paths"])
+    );
+    assert_eq!(detail["config"]["restricted"], json!(true));
+    assert_eq!(detail["config"]["has_authorization"], json!(false));
+    assert_eq!(
+        detail["config"]["restriction_acls"],
+        json!(["REPO_REGION:config_acl"])
+    );
+    assert_eq!(
+        detail["config"]["restriction_paths"],
+        json!(["config/restricted"])
+    );
+    assert_eq!(detail["acl_manifest"]["restricted"], json!(true));
+    assert_eq!(detail["acl_manifest"]["has_authorization"], json!(true));
+    assert_eq!(
+        detail["acl_manifest"]["restriction_acls"],
+        json!(["REPO_REGION:acl_manifest_acl"])
+    );
+    assert_eq!(
+        detail["acl_manifest"]["restriction_paths"],
+        json!(["acl_manifest/restricted"])
+    );
     Ok(())
 }
 
@@ -136,7 +173,7 @@ async fn test_shadow_mismatch_summary_fields_are_logged(fb: FacebookInit) -> Res
 async fn test_shadow_matching_restricted_sources_log_row_without_mismatch(
     fb: FacebookInit,
 ) -> Result<()> {
-    let fixture = ShadowComparisonFieldFixture::new(
+    let samples = ShadowComparisonFieldFixture::new(
         fb,
         Some(restricted_result(
             false,
@@ -151,11 +188,28 @@ async fn test_shadow_matching_restricted_sources_log_row_without_mismatch(
             Some("shared/restricted"),
         )?),
         full_path_access_data()?,
-    )?;
+    )?
+    .log_with(log_source_results_to_scuba)?;
 
-    observe_fixture_shape(fixture);
-    // TODO(T248660053): assert matching restricted sources log a row with
-    // shadow_mismatch=false and no shadow_mismatch_detail.
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(
+        sample_array(sample, "considered_restricted_by"),
+        vec!["manifest_db".to_string(), "acl_manifest".to_string()]
+    );
+    assert_eq!(
+        sample_array(sample, "restricted_paths"),
+        vec!["shared/restricted".to_string()]
+    );
+    assert_eq!(
+        sample_array(sample, "acls"),
+        vec!["REPO_REGION:shared_acl".to_string()]
+    );
+    assert_eq!(
+        sample_field(sample, "shadow_mismatch"),
+        Some("false".to_string())
+    );
+    assert_eq!(sample_field(sample, "shadow_mismatch_detail"), None);
     Ok(())
 }
 
@@ -165,7 +219,7 @@ async fn test_shadow_matching_restricted_sources_log_row_without_mismatch(
 // AclManifest disagreement is recorded in the mismatch summary.
 #[mononoke::fbinit_test]
 async fn test_shadow_aggregate_fields_stay_config_authoritative(fb: FacebookInit) -> Result<()> {
-    let fixture = ShadowComparisonFieldFixture::new(
+    let samples = ShadowComparisonFieldFixture::new(
         fb,
         Some(restricted_result(
             false,
@@ -175,11 +229,48 @@ async fn test_shadow_aggregate_fields_stay_config_authoritative(fb: FacebookInit
         )?),
         Some(unrestricted_result(Some(vec![]))),
         manifest_access_data(ManifestType::HgAugmented),
-    )?;
+    )?
+    .log_with(log_source_results_to_scuba)?;
 
-    observe_fixture_shape(fixture);
-    // TODO(T248660053): assert config remains authoritative for top-level
-    // authorization and restriction fields.
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(
+        sample_field(sample, "has_authorization"),
+        Some("false".to_string())
+    );
+    assert_eq!(
+        sample_field(sample, "has_acl_access"),
+        Some("false".to_string())
+    );
+    assert_eq!(
+        sample_array(sample, "restricted_paths"),
+        vec!["config/restricted".to_string()]
+    );
+    assert_eq!(
+        sample_array(sample, "acls"),
+        vec!["REPO_REGION:config_acl".to_string()]
+    );
+    assert_eq!(
+        sample_array(sample, "considered_restricted_by"),
+        vec!["manifest_db".to_string()]
+    );
+    assert_eq!(
+        sample_field(sample, "shadow_mismatch"),
+        Some("true".to_string())
+    );
+    let detail = sample_json_field(sample, "shadow_mismatch_detail")?
+        .ok_or_else(|| anyhow!("missing shadow_mismatch_detail"))?;
+    assert_eq!(
+        detail["differences"],
+        json!([
+            "restricted",
+            "has_authorization",
+            "restriction_acls",
+            "restriction_paths"
+        ])
+    );
+    assert_eq!(detail["config"]["restricted"], json!(true));
+    assert_eq!(detail["acl_manifest"]["restricted"], json!(false));
     Ok(())
 }
 
@@ -189,16 +280,40 @@ async fn test_shadow_aggregate_fields_stay_config_authoritative(fb: FacebookInit
 // while top-level authorization still comes from the config source.
 #[mononoke::fbinit_test]
 async fn test_shadow_comparison_errors_are_logged(fb: FacebookInit) -> Result<()> {
-    let fixture = ShadowComparisonFieldFixture::new(
+    let samples = ShadowComparisonFieldFixture::new(
         fb,
         Some(unrestricted_result(Some(vec![]))),
         Some(error_result("acl manifest lookup failed")),
         full_path_access_data()?,
-    )?;
+    )?
+    .log_with(log_source_results_to_scuba)?;
 
-    observe_fixture_shape(fixture);
-    // TODO(T248660053): assert acl_manifest_error and shadow_mismatch_detail
-    // are present without an authorization failure.
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(
+        sample_field(sample, "has_authorization"),
+        Some("true".to_string())
+    );
+    assert_eq!(sample_field(sample, "config_error"), None);
+    assert!(
+        sample_field(sample, "acl_manifest_error")
+            .is_some_and(|value| value.contains("acl manifest lookup failed"))
+    );
+    assert_eq!(
+        sample_array(sample, "considered_restricted_by"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        sample_field(sample, "shadow_mismatch"),
+        Some("true".to_string())
+    );
+    let detail = sample_json_field(sample, "shadow_mismatch_detail")?
+        .ok_or_else(|| anyhow!("missing shadow_mismatch_detail"))?;
+    assert_eq!(detail["differences"], json!(["acl_manifest_error"]));
+    assert_eq!(
+        detail["acl_manifest"]["error"],
+        json!("acl manifest lookup failed")
+    );
     Ok(())
 }
 
@@ -207,16 +322,35 @@ async fn test_shadow_comparison_errors_are_logged(fb: FacebookInit) -> Result<()
 // without top-level aggregate authorization fields.
 #[mononoke::fbinit_test]
 async fn test_shadow_error_only_rows_are_logged(fb: FacebookInit) -> Result<()> {
-    let fixture = ShadowComparisonFieldFixture::new(
+    let samples = ShadowComparisonFieldFixture::new(
         fb,
         Some(error_result("config lookup failed")),
         Some(error_result("acl manifest lookup failed")),
         full_path_access_data()?,
-    )?;
+    )?
+    .log_with(log_source_results_to_scuba)?;
 
-    observe_fixture_shape(fixture);
-    // TODO(T248660053): assert both source errors are logged without aggregate
-    // authorization fields.
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(sample_field(sample, "has_authorization"), None);
+    assert!(
+        sample_field(sample, "config_error")
+            .is_some_and(|value| value.contains("config lookup failed"))
+    );
+    assert!(
+        sample_field(sample, "acl_manifest_error")
+            .is_some_and(|value| value.contains("acl manifest lookup failed"))
+    );
+    assert_eq!(
+        sample_field(sample, "shadow_mismatch"),
+        Some("true".to_string())
+    );
+    let detail = sample_json_field(sample, "shadow_mismatch_detail")?
+        .ok_or_else(|| anyhow!("missing shadow_mismatch_detail"))?;
+    assert_eq!(
+        detail["differences"],
+        json!(["config_error", "acl_manifest_error"])
+    );
     Ok(())
 }
 
@@ -226,7 +360,7 @@ async fn test_shadow_error_only_rows_are_logged(fb: FacebookInit) -> Result<()> 
 // detail, or AclManifest source attribution.
 #[mononoke::fbinit_test]
 async fn test_shadow_skipped_comparison_source_is_not_logged(fb: FacebookInit) -> Result<()> {
-    let fixture = ShadowComparisonFieldFixture::new(
+    let samples = ShadowComparisonFieldFixture::new(
         fb,
         Some(restricted_result(
             false,
@@ -236,11 +370,21 @@ async fn test_shadow_skipped_comparison_source_is_not_logged(fb: FacebookInit) -
         )?),
         None,
         manifest_access_data(ManifestType::Hg),
-    )?;
+    )?
+    .log_with(log_source_results_to_scuba)?;
 
-    observe_fixture_shape(fixture);
-    // TODO(T248660053): assert skipped sources do not populate acl_manifest_error,
-    // shadow_mismatch, or AclManifest in considered_restricted_by.
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(sample_field(sample, "acl_manifest_error"), None);
+    assert_eq!(
+        sample_field(sample, "shadow_mismatch"),
+        Some("false".to_string())
+    );
+    assert_eq!(sample_field(sample, "shadow_mismatch_detail"), None);
+    assert_eq!(
+        sample_array(sample, "considered_restricted_by"),
+        vec!["manifest_db".to_string()]
+    );
     Ok(())
 }
 
@@ -248,15 +392,15 @@ async fn test_shadow_skipped_comparison_source_is_not_logged(fb: FacebookInit) -
 // Expected: no Scuba row is written when both sources are unrestricted.
 #[mononoke::fbinit_test]
 async fn test_shadow_unrestricted_sources_do_not_log_rows(fb: FacebookInit) -> Result<()> {
-    let fixture = ShadowComparisonFieldFixture::new(
+    let samples = ShadowComparisonFieldFixture::new(
         fb,
         Some(unrestricted_result(Some(vec![]))),
         Some(unrestricted_result(Some(vec![]))),
         full_path_access_data()?,
-    )?;
+    )?
+    .log_with(log_source_results_to_scuba)?;
 
-    observe_fixture_shape(fixture);
-    // TODO(T248660053): assert unrestricted source results do not log a row.
+    assert_eq!(samples, Vec::<serde_json::Map<String, Value>>::new());
     Ok(())
 }
 
@@ -301,54 +445,6 @@ fn manifest_access_data(manifest_type: ManifestType) -> RestrictedPathAccessData
     )
 }
 
-fn observe_fixture_shape(fixture: ShadowComparisonFieldFixture) {
-    let ShadowComparisonFieldFixture {
-        ctx,
-        repo_id,
-        acl_manifest_mode,
-        config_result,
-        acl_manifest_result,
-        access_data,
-        scuba,
-        log_path,
-    } = fixture;
-
-    let _ = (ctx, repo_id, acl_manifest_mode, scuba, log_path);
-    observe_source_result(config_result);
-    observe_source_result(acl_manifest_result);
-    observe_access_data(access_data);
-}
-
-fn observe_source_result(result: Option<SourceRestrictionResult>) {
-    match result {
-        Some(Ok(result)) => {
-            let _ = (
-                result.has_authorization,
-                result.has_acl_access,
-                &result.restriction_acls,
-                &result.restriction_paths,
-                result.is_allowlisted_tooling,
-                result.is_rollout_allowlisted,
-            );
-        }
-        Some(Err(err)) => {
-            let _ = err;
-        }
-        None => {}
-    }
-}
-
-fn observe_access_data(access_data: RestrictedPathAccessData) {
-    match access_data {
-        RestrictedPathAccessData::Manifest(manifest_id, manifest_type) => {
-            let _ = (manifest_id, manifest_type);
-        }
-        RestrictedPathAccessData::FullPath { full_path } => {
-            let _ = full_path;
-        }
-    }
-}
-
 fn read_logged_samples(log_path: &std::path::Path) -> Result<Vec<serde_json::Map<String, Value>>> {
     let contents = std::fs::read_to_string(log_path)
         .with_context(|| format!("failed to read scuba log {}", log_path.display()))?;
@@ -383,10 +479,6 @@ fn sample_field(sample: &serde_json::Map<String, Value>, key: &str) -> Option<St
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "shadow comparison assertion tests start using logged samples in the next diff"
-)]
 fn sample_json_field(sample: &serde_json::Map<String, Value>, key: &str) -> Result<Option<Value>> {
     sample_field(sample, key)
         .map(|value| {
@@ -396,10 +488,6 @@ fn sample_json_field(sample: &serde_json::Map<String, Value>, key: &str) -> Resu
         .transpose()
 }
 
-#[expect(
-    dead_code,
-    reason = "shadow comparison assertion tests start using logged samples in the next diff"
-)]
 fn sample_array(sample: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
     match sample.get(key).and_then(Value::as_array) {
         Some(values) => values
