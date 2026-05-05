@@ -158,6 +158,10 @@ impl RestrictedPaths {
         self.use_acl_manifest
     }
 
+    fn use_config_path_lookup(&self) -> bool {
+        !self.use_acl_manifest
+    }
+
     // -----------------------------------------------------------------------
     // Public restriction lookup methods
     // -----------------------------------------------------------------------
@@ -170,7 +174,7 @@ impl RestrictedPaths {
         cs_id: Option<ChangesetId>,
         paths: &[NonRootMPath],
     ) -> Result<Vec<PathRestrictionInfo>> {
-        if !self.use_acl_manifest {
+        if self.use_config_path_lookup() {
             return Ok(restriction_info::get_exact_path_restriction_from_config(
                 self, paths,
             ));
@@ -197,7 +201,7 @@ impl RestrictedPaths {
         cs_id: Option<ChangesetId>,
         paths: &[NonRootMPath],
     ) -> Result<Vec<PathRestrictionInfo>> {
-        if !self.use_acl_manifest {
+        if self.use_config_path_lookup() {
             return Ok(restriction_info::get_path_restriction_info_from_config(
                 self, paths,
             ));
@@ -267,7 +271,7 @@ impl RestrictedPaths {
         cs_id: Option<ChangesetId>,
         roots: Vec<MPath>,
     ) -> Result<Vec<PathRestrictionInfo>> {
-        if !self.use_acl_manifest {
+        if self.use_config_path_lookup() {
             return Ok(restriction_info::find_restricted_descendants_from_config(
                 self, &roots,
             ));
