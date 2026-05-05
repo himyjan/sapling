@@ -24,6 +24,7 @@ use scuba_ext::MononokeScubaSampleBuilder;
 
 use crate::ManifestId;
 use crate::ManifestType;
+use crate::restriction_check;
 
 /// Result from restricted path access check — carries both authorization
 /// and restriction root info for enforcement condition evaluation.
@@ -314,28 +315,14 @@ pub(crate) async fn log_access_to_restricted_path(
     scuba: MononokeScubaSampleBuilder,
     considered_restricted_by: Vec<String>,
 ) -> Result<RestrictionCheckResult> {
-    // TODO(T239041722): store permission checkers in RestrictedPaths to improve
-    // performance if needed.
-    let has_path_acl_access =
-        has_read_access_to_repo_region_acls(ctx, &acl_provider, &acls).await?;
-
-    // Check if caller is in the tooling allowlist group
-    let is_allowlisted_tooling = if let Some(group_name) = tooling_allowlist_group {
-        is_part_of_group(ctx, &acl_provider, group_name).await?
-    } else {
-        false
-    };
-
-    // Check if caller is in the rollout allowlist group
-    let is_rollout_allowlisted = if let Some(group_name) = rollout_allowlist_group {
-        is_part_of_group(ctx, &acl_provider, group_name).await?
-    } else {
-        false
-    };
-
-    // Caller has authorization if they have access via path ACLs, tooling allowlist,
-    // or rollout allowlist
-    let has_authorization = has_path_acl_access || is_allowlisted_tooling || is_rollout_allowlisted;
+    let authorization = restriction_check::check_authorization(
+        ctx,
+        &acl_provider,
+        &acls,
+        tooling_allowlist_group,
+        rollout_allowlist_group,
+    )
+    .await?;
 
     // Override sampling for unauthorized SCSC accesses to restricted paths
     #[cfg(fbcode_build)]
@@ -347,7 +334,7 @@ pub(crate) async fn log_access_to_restricted_path(
             .client_request_info()
             .is_some_and(|cri| cri.entry_point == ClientEntryPoint::ScsClient);
 
-        if is_scsc && !has_authorization {
+        if is_scsc && !authorization.has_authorization() {
             ctx.set_override_sampling();
         }
     }
@@ -368,9 +355,9 @@ pub(crate) async fn log_access_to_restricted_path(
                 repo_id,
                 &restricted_paths,
                 &access_data,
-                has_authorization,
-                is_allowlisted_tooling,
-                is_rollout_allowlisted,
+                authorization.has_authorization(),
+                authorization.is_allowlisted_tooling,
+                authorization.is_rollout_allowlisted,
                 &acls,
             ) {
                 tracing::error!("Failed to log to schematized logger: {:?}", e);
@@ -383,19 +370,19 @@ pub(crate) async fn log_access_to_restricted_path(
         repo_id,
         &restricted_paths,
         access_data,
-        has_authorization,
-        is_allowlisted_tooling,
-        is_rollout_allowlisted,
-        has_path_acl_access,
+        authorization.has_authorization(),
+        authorization.is_allowlisted_tooling,
+        authorization.is_rollout_allowlisted,
+        authorization.has_acl_access,
         acls,
         scuba,
         considered_restricted_by,
     )?;
 
-    Ok(RestrictionCheckResult {
-        has_authorization,
-        restriction_roots: restricted_paths,
-    })
+    Ok(restriction_check::build_restriction_check_result(
+        authorization.has_authorization(),
+        restricted_paths,
+    ))
 }
 
 fn log_access_to_scuba(
