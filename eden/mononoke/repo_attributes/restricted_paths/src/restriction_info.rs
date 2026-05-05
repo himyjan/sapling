@@ -90,6 +90,43 @@ pub(crate) fn find_restricted_descendants_from_config(
     results
 }
 
+/// Get manifest-id-store paths for a manifest access through the config-backed source.
+pub(crate) async fn get_manifest_restricted_paths_from_config(
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    manifest_id: &ManifestId,
+    manifest_type: &ManifestType,
+) -> Result<Vec<NonRootMPath>> {
+    if let Some(manifest_id_cache) = restricted_paths.config_based().manifest_id_cache() {
+        let cache_guard = manifest_id_cache
+            .cache()
+            .read()
+            .map_err(|err| anyhow::anyhow!("Failed to acquire cache read lock: {err}"))?;
+        return Ok(cache_guard
+            .get(manifest_type)
+            .and_then(|type_map| type_map.get(manifest_id))
+            .cloned()
+            .unwrap_or_default());
+    }
+
+    restricted_paths
+        .config_based()
+        .manifest_id_store()
+        .get_paths_by_manifest_id(ctx, manifest_id, manifest_type)
+        .await
+}
+
+/// Get config ACLs that match manifest-id-store paths.
+pub(crate) fn get_config_acls_for_paths<'a>(
+    restricted_paths: &'a RestrictedPaths,
+    paths: &[NonRootMPath],
+) -> Vec<&'a MononokeIdentity> {
+    paths
+        .iter()
+        .filter_map(|path| restricted_paths.config_based().get_acl_for_path(path))
+        .collect()
+}
+
 /// Get exact path restriction info for one or more paths.
 #[expect(dead_code, reason = "interface skeleton for the split stack")]
 pub(crate) async fn get_exact_path_restriction(
@@ -148,12 +185,34 @@ pub(crate) async fn find_restricted_descendants(
 /// Lookup restriction info for a manifest access through the config-backed source.
 #[expect(dead_code, reason = "interface skeleton for the split stack")]
 pub(crate) async fn get_manifest_restriction_info_from_config(
-    _restricted_paths: &RestrictedPaths,
-    _ctx: &CoreContext,
-    _manifest_id: &ManifestId,
-    _manifest_type: &ManifestType,
+    restricted_paths: &RestrictedPaths,
+    ctx: &CoreContext,
+    manifest_id: &ManifestId,
+    manifest_type: &ManifestType,
 ) -> Result<Vec<ManifestRestrictionInfo>> {
-    unimplemented!("implemented by the follow-up extraction diff")
+    let paths = get_manifest_restricted_paths_from_config(
+        restricted_paths,
+        ctx,
+        manifest_id,
+        manifest_type,
+    )
+    .await?;
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            restricted_paths
+                .config_based()
+                .get_acl_for_path(&path)
+                .map(|acl| {
+                    let repo_region_acl = acl.to_string();
+                    ManifestRestrictionInfo {
+                        restriction_root: Some(path),
+                        request_acl: repo_region_acl.clone(),
+                        repo_region_acl,
+                    }
+                })
+        })
+        .collect())
 }
 
 fn get_config_path_restriction_info_for_path(

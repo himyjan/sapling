@@ -42,7 +42,6 @@ use mononoke_types::acl_manifest::AclManifestEntryBlob;
 use mononoke_types::acl_manifest::AclManifestRestriction;
 use mononoke_types::typed_hash::AclManifestId;
 use permission_checker::AclProvider;
-use permission_checker::MononokeIdentity;
 use repo_derived_data::ArcRepoDerivedData;
 pub use restricted_paths_common::*;
 use scuba_ext::MononokeScubaSampleBuilder;
@@ -310,25 +309,13 @@ impl RestrictedPaths {
             });
         }
 
-        // Try to use cache first, fall back to DB query if cache is not available
-        let paths = if let Some(manifest_id_cache) = self.config_based.manifest_id_cache() {
-            // Read from cache
-            let cache_guard = manifest_id_cache
-                .cache()
-                .read()
-                .map_err(|e| anyhow::anyhow!("Failed to acquire cache read lock: {}", e))?;
-            cache_guard
-                .get(&manifest_type)
-                .and_then(|type_map| type_map.get(&manifest_id))
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            // Fall back to DB query if cache is not available
-            self.config_based
-                .manifest_id_store()
-                .get_paths_by_manifest_id(ctx, &manifest_id, &manifest_type)
-                .await?
-        };
+        let paths = restriction_info::get_manifest_restricted_paths_from_config(
+            self,
+            ctx,
+            &manifest_id,
+            &manifest_type,
+        )
+        .await?;
 
         if paths.is_empty() {
             return Ok(RestrictionCheckResult {
@@ -341,10 +328,7 @@ impl RestrictedPaths {
         // from the restricted paths store, not with changesets, so we always use
         // the config to determine which paths are restricted.
         // TODO(T248660053): support manifest-based access usign AclManifests.
-        let acls: Vec<&MononokeIdentity> = paths
-            .iter()
-            .filter_map(|path| self.config_based.get_acl_for_path(path))
-            .collect();
+        let acls = restriction_info::get_config_acls_for_paths(self, &paths);
 
         log_access_to_restricted_path(
             ctx,
@@ -853,6 +837,7 @@ mod tests {
     use fbinit::FacebookInit;
     use mononoke_macros::mononoke;
     use mononoke_types::NonRootMPath;
+    use permission_checker::MononokeIdentity;
 
     use super::*;
     use crate::test_utils::build_test_restricted_paths_with_dummy_acl_provider as build_test_restricted_paths;
