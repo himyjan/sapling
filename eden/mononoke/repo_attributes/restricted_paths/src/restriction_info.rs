@@ -18,6 +18,9 @@ use crate::ManifestId;
 use crate::ManifestType;
 use crate::RestrictedPaths;
 
+#[cfg(test)]
+mod tests;
+
 /// Core restriction information for a path.
 /// Does not include access check results; that is the API layer's concern
 /// (see `mononoke_api::PathAccessInfo`).
