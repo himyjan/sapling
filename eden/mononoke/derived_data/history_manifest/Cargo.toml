@@ -25,6 +25,7 @@ mononoke_macros = { version = "0.1.0", path = "../../common/mononoke_macros" }
 mononoke_types = { version = "0.1.0", path = "../../mononoke_types" }
 smallvec = { version = "1.15", features = ["impl_bincode", "serde", "specialization", "union", "write"] }
 thiserror = "2.0.18"
+unodes = { version = "0.1.0", path = "../unodes" }
 
 [dev-dependencies]
 bonsai_hg_mapping = { version = "0.1.0", path = "../../repo_attributes/bonsai_hg_mapping" }

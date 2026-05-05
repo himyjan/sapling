@@ -10,11 +10,16 @@ use thiserror::Error;
 mod derive;
 mod mapping;
 mod merge_subtrees;
+pub mod rename_sources;
 
 #[cfg(test)]
 mod tests;
 
 pub use crate::mapping::RootHistoryManifestDirectoryId;
+pub use crate::rename_sources::HmCopyInfoSource;
+pub use crate::rename_sources::HmRenameSource;
+pub use crate::rename_sources::HmRenameSources;
+pub use crate::rename_sources::find_hm_rename_sources;
 
 #[derive(Debug, Error)]
 pub enum HistoryManifestDerivationError {
