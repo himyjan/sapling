@@ -17,7 +17,6 @@ import difflib
 import errno
 import operator
 import os
-import random
 import shlex
 import socket
 import ssl
@@ -66,7 +65,6 @@ from .. import (
     revset,
     revsetlang,
     scmutil,
-    setdiscovery,
     simplemerge,
     smartset,
     sslutil,
@@ -1274,41 +1272,6 @@ def debugdiffdirs(ui, repo, *pats, **opts) -> None:
         fm.data(path=path, status=status)
 
     fm.end()
-
-
-@command(
-    "debugdiscovery",
-    [("", "rev", [], "restrict discovery to this set of revs")],
-    _("[--rev REV] [OTHER]"),
-)
-def debugdiscovery(ui, repo, remoteurl: str = "default", **opts) -> None:
-    """runs the changeset discovery protocol in isolation"""
-    remoteurl = hg.parseurl(ui.expandpath(remoteurl))
-    remote = hg.peer(repo, opts, remoteurl)
-    ui.status(_("comparing with %s\n") % util.hidepassword(remoteurl))
-
-    # make sure tests are repeatable
-    random.seed(12323)
-
-    def doit(pushedrevs, remote=remote):
-        nodes = None
-        if pushedrevs:
-            revs = scmutil.revrange(repo, pushedrevs)
-            nodes = [repo[r].node() for r in revs]
-        common, any, hds = setdiscovery.findcommonheads(
-            ui, repo, remote, ancestorsof=nodes
-        )
-        common = set(common)
-        rheads = set(hds)
-        lheads = set(repo.heads())
-        ui.write(_x("common heads: %s\n") % " ".join(sorted(short(n) for n in common)))
-        if lheads <= common:
-            ui.write(_x("local is subset\n"))
-        elif rheads <= common:
-            ui.write(_x("remote is subset\n"))
-
-    localrevs = opts["rev"]
-    doit(localrevs)
 
 
 @command(

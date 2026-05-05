@@ -28,7 +28,6 @@ Push:
   pushing rev 178c10ffbc2f to destination test:e1 bookmark master
   DEBUG eagerepo::api: bookmarks master
   DEBUG eagerepo::api: commit_known 178c10ffbc2f92d5407c14478ae9d9dea81f232e
-  DEBUG sapling::eagerpeer: heads = []
   searching for changes
   DEBUG eagerepo::api: commit_known 748104bd5058bf2c386d074d8dcf2704855380f6
   DEBUG eagerepo::api: bookmarks master

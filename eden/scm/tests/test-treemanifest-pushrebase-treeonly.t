@@ -50,7 +50,7 @@ Make server treeonly and push trees to it
   remote: pushing 2 changesets:
   remote:     e297a1e684b7  C
   remote:     0560779f58ae  D
-  remote: 2 new changesets from the server will be downloaded
+  remote: 3 new changesets from the server will be downloaded
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
   $ tglog --stat -l 2

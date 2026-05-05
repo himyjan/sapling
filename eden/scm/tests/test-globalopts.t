@@ -15,7 +15,6 @@
   $ sl ci -A -d'1 0' -m b
   adding b
   $ sl push -q -r . --to master_b --create --force
-  warning: repository is unrelated
 
   $ newclientrepo c server_server master_a
   $ cat >> .sl/config <<EOF

@@ -262,13 +262,8 @@ def _findcommonheadsnew(
         remoteheads, remotehassample = batch.results()
         commonsample = {n for n, known in zip(sample, remotehassample) if known}
 
-    # If the server has no selected names (ex. master), fallback to fetch all heads. This
-    # is only used by test-setdiscovery.t, which is annoying to migrate.
-    if not remoteheads:
-        remoteheads = set(remote.heads())
-    else:
-        # Normalize 'remoteheads' to Set[node].
-        remoteheads = set(bin(h) for h in remoteheads.values())
+    # Normalize 'remoteheads' to Set[node].
+    remoteheads = set(bin(h) for h in remoteheads.values())
 
     # Unconditionally include 'explicitremoteheads', if selectivepull is used.
     #
