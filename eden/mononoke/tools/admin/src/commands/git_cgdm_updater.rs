@@ -284,6 +284,10 @@ async fn update_cgdm(
 
     // Go through the new commits and for each either create a new component
     // or add them to one of their parent components if possible
+    let all_parents = repo
+        .commit_graph()
+        .many_changeset_parents(ctx, &cs_ids)
+        .await?;
     let mut new_full_components = vec![];
     for (index, cs_id) in cs_ids.into_iter().enumerate() {
         let mut found = false;
@@ -292,7 +296,10 @@ async fn update_cgdm(
             .get(&cs_id)
             .ok_or_else(|| anyhow!("Can't find GDM size for {}", cs_id))?;
 
-        let parents = repo.commit_graph().changeset_parents(ctx, cs_id).await?;
+        let parents = all_parents
+            .get(&cs_id)
+            .ok_or_else(|| anyhow!("Can't find parents for {}", cs_id))?
+            .clone();
         let max_parent_component_id = parents
             .iter()
             .map(|parent| {
