@@ -26,6 +26,9 @@ use crate::ManifestId;
 use crate::ManifestType;
 use crate::restriction_check;
 
+#[cfg(test)]
+mod tests;
+
 /// Result from restricted path access check — carries both authorization
 /// and restriction root info for enforcement condition evaluation.
 #[derive(Debug, Clone)]
@@ -44,6 +47,73 @@ pub(crate) enum RestrictedPathAccessData {
     Manifest(ManifestId, ManifestType),
     /// When the tree is accessed by path
     FullPath { full_path: NonRootMPath },
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "test-only setup before Shadow source logging wires production callers"
+    )
+)]
+pub(crate) type SourceRestrictionResult =
+    std::result::Result<Arc<SourceRestrictionCheckResult>, Arc<anyhow::Error>>;
+
+/// Authorization and restriction data for one logging source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SourceRestrictionCheckResult {
+    pub(crate) has_authorization: bool,
+    pub(crate) has_acl_access: bool,
+    pub(crate) restriction_acls: Vec<MononokeIdentity>,
+    pub(crate) restriction_paths: Option<Vec<NonRootMPath>>,
+    pub(crate) is_allowlisted_tooling: bool,
+    pub(crate) is_rollout_allowlisted: bool,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "test-only setup before Shadow source logging wires production callers"
+    )
+)]
+impl SourceRestrictionCheckResult {
+    pub(crate) fn new(
+        has_authorization: bool,
+        has_acl_access: bool,
+        restriction_acls: Vec<MononokeIdentity>,
+        restriction_paths: Option<Vec<NonRootMPath>>,
+        is_allowlisted_tooling: bool,
+        is_rollout_allowlisted: bool,
+    ) -> Self {
+        Self {
+            has_authorization,
+            has_acl_access,
+            restriction_acls,
+            restriction_paths,
+            is_allowlisted_tooling,
+            is_rollout_allowlisted,
+        }
+    }
+
+    pub(crate) fn unrestricted(restriction_paths: Option<Vec<NonRootMPath>>) -> Self {
+        Self {
+            has_authorization: true,
+            has_acl_access: true,
+            restriction_acls: Vec::new(),
+            restriction_paths,
+            is_allowlisted_tooling: false,
+            is_rollout_allowlisted: false,
+        }
+    }
+
+    #[expect(
+        dead_code,
+        reason = "source logging helper starts using this in the next diff"
+    )]
+    fn is_restricted(&self) -> bool {
+        !self.restriction_acls.is_empty()
+    }
 }
 
 /// Check if the caller has read access to every repo region ACL in `acls`

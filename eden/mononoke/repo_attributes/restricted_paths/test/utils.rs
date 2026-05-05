@@ -114,6 +114,11 @@ pub struct ScubaAccessLogSample {
     has_acl_access: bool,
     acls: Vec<MononokeIdentity>,
     considered_restricted_by: Vec<String>,
+    acl_manifest_mode: Option<String>,
+    config_error: Option<String>,
+    acl_manifest_error: Option<String>,
+    shadow_mismatch: Option<bool>,
+    shadow_mismatch_detail: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +135,11 @@ pub struct ScubaAccessLogSampleBuilder {
     has_acl_access: Option<bool>,
     acls: Vec<MononokeIdentity>,
     considered_restricted_by: Vec<String>,
+    acl_manifest_mode: Option<String>,
+    config_error: Option<String>,
+    acl_manifest_error: Option<String>,
+    shadow_mismatch: Option<bool>,
+    shadow_mismatch_detail: Option<String>,
 }
 
 impl ScubaAccessLogSampleBuilder {
@@ -147,6 +157,11 @@ impl ScubaAccessLogSampleBuilder {
             has_acl_access: None,
             acls: Vec::new(),
             considered_restricted_by: vec!["manifest_db".to_string()],
+            acl_manifest_mode: None,
+            config_error: None,
+            acl_manifest_error: None,
+            shadow_mismatch: None,
+            shadow_mismatch_detail: None,
         }
     }
 
@@ -236,6 +251,11 @@ impl ScubaAccessLogSampleBuilder {
             has_acl_access,
             acls: self.acls,
             considered_restricted_by: self.considered_restricted_by,
+            acl_manifest_mode: self.acl_manifest_mode,
+            config_error: self.config_error,
+            acl_manifest_error: self.acl_manifest_error,
+            shadow_mismatch: self.shadow_mismatch,
+            shadow_mismatch_detail: self.shadow_mismatch_detail,
         })
     }
 }
@@ -1098,6 +1118,15 @@ fn deserialize_scuba_log_file(
                             })
                             .unwrap_or_default();
 
+                    let acl_manifest_mode =
+                        optional_string_field(&flattened_log, "acl_manifest_mode");
+                    let config_error = optional_string_field(&flattened_log, "config_error");
+                    let acl_manifest_error =
+                        optional_string_field(&flattened_log, "acl_manifest_error");
+                    let shadow_mismatch = optional_bool_field(&flattened_log, "shadow_mismatch")?;
+                    let shadow_mismatch_detail =
+                        optional_string_field(&flattened_log, "shadow_mismatch_detail");
+
                     Ok(ScubaAccessLogSample {
                         repo_id,
                         restricted_paths,
@@ -1111,12 +1140,29 @@ fn deserialize_scuba_log_file(
                         client_main_id,
                         acls,
                         considered_restricted_by,
+                        acl_manifest_mode,
+                        config_error,
+                        acl_manifest_error,
+                        shadow_mismatch,
+                        shadow_mismatch_detail,
                     })
                 })?
         })
         .collect::<Result<Vec<_>>>()?;
 
     Ok(log_samples)
+}
+
+fn optional_string_field(flattened_log: &serde_json::Value, key: &str) -> Option<String> {
+    flattened_log[key].as_str().map(String::from)
+}
+
+fn optional_bool_field(flattened_log: &serde_json::Value, key: &str) -> Result<Option<bool>> {
+    flattened_log[key]
+        .as_str()
+        .map(|value| value.parse::<bool>())
+        .transpose()
+        .with_context(|| format!("failed to parse {key} as bool"))
 }
 
 pub(crate) fn cast_to_non_root_mpaths(paths: Vec<&str>) -> Result<Vec<NonRootMPath>> {
