@@ -201,7 +201,7 @@ impl SaplingRemoteApi for EagerRepo {
             Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: "failpoint".to_string(),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url("files_attrs"),
             })
         });
@@ -319,7 +319,7 @@ impl SaplingRemoteApi for EagerRepo {
             Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: "failpoint".to_string(),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url("trees"),
             })
         });
@@ -726,7 +726,7 @@ impl SaplingRemoteApi for EagerRepo {
             return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: "must specify one of 'to' or 'from'".to_string(),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url("set_bookmark"),
             });
         }
@@ -737,7 +737,7 @@ impl SaplingRemoteApi for EagerRepo {
                     return Err(SaplingRemoteApiError::HttpError {
                         status: StatusCode::NOT_FOUND,
                         message: format!("bookmark {bookmark} doesn't exist"),
-                        headers: Default::default(),
+                        headers: Box::default(),
                         url: self.url("set_bookmark"),
                     });
                 }
@@ -748,7 +748,7 @@ impl SaplingRemoteApi for EagerRepo {
                             message: format!(
                                 "bookmark {bookmark}'s current value is {node}, not {from}"
                             ),
-                            headers: Default::default(),
+                            headers: Box::default(),
                             url: self.url("set_bookmark"),
                         });
                     }
@@ -758,7 +758,7 @@ impl SaplingRemoteApi for EagerRepo {
             return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: format!("bookmark {bookmark} already exists"),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url("set_bookmark"),
             });
         }
@@ -1001,7 +1001,7 @@ impl SaplingRemoteApi for EagerRepo {
                 Some("error") => Err(SaplingRemoteApiError::HttpError {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
                     message: "failpoint".to_string(),
-                    headers: Default::default(),
+                    headers: Box::default(),
                     url: self.url("upload_changesets"),
                 }),
                 Some("empty") => Ok(convert_to_response(Vec::new())),
@@ -1071,7 +1071,7 @@ impl SaplingRemoteApi for EagerRepo {
                     return Err(SaplingRemoteApiError::HttpError {
                         status: StatusCode::INTERNAL_SERVER_ERROR,
                         message: format!("error inserting mutation entry: {:?}", err),
-                        headers: Default::default(),
+                        headers: Box::default(),
                         url: self.url("upload_changesets"),
                     });
                 }
@@ -1129,7 +1129,7 @@ impl SaplingRemoteApi for EagerRepo {
                     return Err(SaplingRemoteApiError::HttpError {
                         status: StatusCode::INTERNAL_SERVER_ERROR,
                         message: format!("{:?}", e),
-                        headers: Default::default(),
+                        headers: Box::default(),
                         url: self.url("lookup_batch"),
                     });
                 }
@@ -1159,7 +1159,7 @@ impl SaplingRemoteApi for EagerRepo {
             return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: "from_repo and to_repo not supported".to_string(),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url("commit_translate_id"),
             });
         }
@@ -1168,7 +1168,7 @@ impl SaplingRemoteApi for EagerRepo {
             return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: "only hg and bonsai supported".to_string(),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url("commit_translate_id"),
             });
         }
@@ -1198,7 +1198,7 @@ impl SaplingRemoteApi for EagerRepo {
                     return Err(SaplingRemoteApiError::HttpError {
                         status: StatusCode::BAD_REQUEST,
                         message: "only hg and bonsai supported".to_string(),
-                        headers: Default::default(),
+                        headers: Box::default(),
                         url: self.url("commit_translate_id"),
                     });
                 }
@@ -1328,7 +1328,7 @@ impl SaplingRemoteApi for EagerRepo {
                 return Err(SaplingRemoteApiError::HttpError {
                     status: StatusCode::NOT_FOUND,
                     message: format!("bookmark {} was not found", bookmark),
-                    headers: Default::default(),
+                    headers: Box::default(),
                     url: self.url("land_stack"),
                 });
             }
@@ -1640,7 +1640,7 @@ impl EagerRepo {
             None => Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::NOT_FOUND,
                 message: format!("{} cannot be found", id.to_hex()),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url(handler),
             }),
             Some(data) => Ok(data),
@@ -1665,7 +1665,7 @@ impl EagerRepo {
             Err(e) => Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!("{:?}", e),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url(handler),
             }),
         }
@@ -1683,7 +1683,7 @@ impl EagerRepo {
                 return Err(SaplingRemoteApiError::HttpError {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
                     message: format!("{:?}", e),
-                    headers: Default::default(),
+                    headers: Box::default(),
                     url: self.url(handler),
                 });
             }
@@ -1692,7 +1692,7 @@ impl EagerRepo {
             return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: "content hash mismatch".to_string(),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url(handler),
             });
         }
@@ -1718,7 +1718,7 @@ impl EagerRepo {
             Err(e) => Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!("{:?}", e),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url(handler),
             }),
         }
@@ -1734,7 +1734,7 @@ impl EagerRepo {
             None => Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::NOT_FOUND,
                 message: format!("{} cannot be found", id.to_hex()),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url(handler),
             }),
             Some(data) => Ok(data),
@@ -1747,7 +1747,7 @@ impl EagerRepo {
             .map_err(|err| SaplingRemoteApiError::HttpError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!("error flushing dag/store: {:?}", err),
-                headers: Default::default(),
+                headers: Box::default(),
                 url: self.url(handler),
             })
     }
@@ -1757,7 +1757,7 @@ impl EagerRepo {
         SaplingRemoteApiError::HttpError {
             status: StatusCode::NOT_IMPLEMENTED,
             message,
-            headers: Default::default(),
+            headers: Box::default(),
             url: self.url(handler),
         }
     }

@@ -31,7 +31,7 @@ pub enum SaplingRemoteApiError {
     HttpError {
         status: StatusCode,
         message: String,
-        headers: HeaderMap,
+        headers: Box<HeaderMap>,
         url: String,
     },
     #[error(transparent)]
@@ -39,7 +39,7 @@ pub enum SaplingRemoteApiError {
     #[error(transparent)]
     WireToApiConversionFailed(#[from] WireToApiConversionError),
     #[error(transparent)]
-    ServerError(#[from] SaplingRemoteApiServerError),
+    ServerError(Box<SaplingRemoteApiServerError>),
     #[error("expected response, but none returned by the server")]
     NoResponse,
     #[error(transparent)]
@@ -60,6 +60,12 @@ pub enum ConfigError {
     Missing(String),
     #[error("invalid config item: '{0}' ({1})")]
     Invalid(String, #[source] anyhow::Error),
+}
+
+impl From<SaplingRemoteApiServerError> for SaplingRemoteApiError {
+    fn from(err: SaplingRemoteApiServerError) -> Self {
+        Self::ServerError(Box::new(err))
+    }
 }
 
 impl SaplingRemoteApiError {

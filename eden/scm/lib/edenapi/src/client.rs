@@ -1637,9 +1637,8 @@ impl SaplingRemoteApi for Client {
         let flattened_response = response
             .into_iter()
             .map(|res| {
-                res.data.map_err(|err| {
-                    SaplingRemoteApiError::ServerError(SaplingRemoteApiServerError::new(err))
-                })
+                res.data
+                    .map_err(|err| SaplingRemoteApiServerError::new(err).into())
             })
             .collect::<Result<Vec<BookmarkEntry>, _>>();
         return flattened_response;
@@ -1669,9 +1668,8 @@ impl SaplingRemoteApi for Client {
         response
             .into_iter()
             .map(|res| {
-                res.data.map_err(|err| {
-                    SaplingRemoteApiError::ServerError(SaplingRemoteApiServerError::new(err))
-                })
+                res.data
+                    .map_err(|err| SaplingRemoteApiServerError::new(err).into())
             })
             .collect::<Result<Vec<BookmarkEntry>, _>>()
     }
@@ -2328,7 +2326,7 @@ async fn raise_for_status(res: AsyncResponse) -> Result<AsyncResponse, SaplingRe
     Err(SaplingRemoteApiError::HttpError {
         status,
         message,
-        headers,
+        headers: Box::new(headers),
         url,
     })
 }

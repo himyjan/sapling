@@ -157,7 +157,7 @@ mod tests {
                 SaplingRemoteApiError::HttpError {
                     status: http::StatusCode::NOT_FOUND,
                     message: "Not found".to_string(),
-                    headers: http::HeaderMap::new(),
+                    headers: Box::new(http::HeaderMap::new()),
                     url: "https://example.com".to_string(),
                 },
                 BackingStoreErrorKind::Network,
