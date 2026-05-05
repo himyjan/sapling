@@ -48,6 +48,7 @@ use serde::Serialize;
 use termstyle::Styler;
 use types::RepoPathBuf;
 use types::hgid::WDIR_ID;
+use types::path::RelativizedRepoPath;
 use types::path::RepoPathRelativizer;
 
 const OUTPUT_BUFFER_CAPACITY: usize = 64 * 1024;
@@ -142,8 +143,10 @@ impl<W: Write> PlainTextWriter<W> {
         inner.write_all(&style.suffix)
     }
 
-    fn write_path(&mut self, path: &str) -> io::Result<()> {
-        Self::write_styled_bytes(&mut self.inner, &self.path_style, path.as_bytes())
+    fn write_path(&mut self, path: impl std::fmt::Display) -> io::Result<()> {
+        self.inner.write_all(&self.path_style.prefix)?;
+        write!(self.inner, "{path}")?;
+        self.inner.write_all(&self.path_style.suffix)
     }
 
     fn write_line_number(&mut self, line_number: u64) -> io::Result<()> {
@@ -155,7 +158,12 @@ impl<W: Write> PlainTextWriter<W> {
         )
     }
 
-    fn write_prefix(&mut self, path: &str, line_number: Option<u64>, sep: u8) -> io::Result<()> {
+    fn write_prefix(
+        &mut self,
+        path: impl std::fmt::Display,
+        line_number: Option<u64>,
+        sep: u8,
+    ) -> io::Result<()> {
         self.write_path(path)?;
         self.inner.write_all(&[sep])?;
         if let Some(line_number) = line_number {
@@ -186,7 +194,7 @@ impl<W: Write> PlainTextWriter<W> {
 
     pub(crate) fn write_match_line(
         &mut self,
-        path: &str,
+        path: impl std::fmt::Display,
         line_number: Option<u64>,
         line: &[u8],
         matches: &[Match],
@@ -203,7 +211,7 @@ impl<W: Write> PlainTextWriter<W> {
 
     pub(crate) fn write_plain_match_line(
         &mut self,
-        path: &str,
+        path: impl std::fmt::Display,
         line_number: Option<u64>,
         line: &[u8],
     ) -> io::Result<()> {
@@ -215,7 +223,7 @@ impl<W: Write> PlainTextWriter<W> {
 
     pub(crate) fn write_context_line(
         &mut self,
-        path: &str,
+        path: impl std::fmt::Display,
         line_number: Option<u64>,
         line: &[u8],
     ) -> io::Result<()> {
@@ -234,12 +242,12 @@ impl<W: Write> PlainTextWriter<W> {
         self.inner.write_all(b"\n")
     }
 
-    pub(crate) fn write_file_match(&mut self, path: &str) -> io::Result<()> {
+    pub(crate) fn write_file_match(&mut self, path: impl std::fmt::Display) -> io::Result<()> {
         self.write_path(path)?;
         self.inner.write_all(b"\n")
     }
 
-    pub(crate) fn write_binary_match(&mut self, path: &str) -> io::Result<()> {
+    pub(crate) fn write_binary_match(&mut self, path: impl std::fmt::Display) -> io::Result<()> {
         self.inner.write_all(b"Binary file ")?;
         self.write_path(path)?;
         self.inner.write_all(b" matches\n")
@@ -247,7 +255,7 @@ impl<W: Write> PlainTextWriter<W> {
 
     pub(crate) fn write_binary_quit_warning(
         &mut self,
-        path: &str,
+        path: impl std::fmt::Display,
         quit_byte: u8,
         offset: u64,
     ) -> io::Result<()> {
@@ -266,8 +274,8 @@ impl<W: Write> PlainTextWriter<W> {
 
 /// A grep match entry for JSON output.
 #[derive(Serialize)]
-pub(crate) struct GrepMatch<'a> {
-    pub path: &'a str,
+pub(crate) struct GrepMatch<'a, P: Serialize> {
+    pub path: P,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_number: Option<u64>,
     pub text: &'a str,
@@ -275,14 +283,14 @@ pub(crate) struct GrepMatch<'a> {
 
 /// A file match entry for JSON output (used with -l flag).
 #[derive(Serialize)]
-pub(crate) struct GrepFileMatch<'a> {
-    pub path: &'a str,
+pub(crate) struct GrepFileMatch<P: Serialize> {
+    pub path: P,
 }
 
 struct RelativizeOnce<'a> {
     relativizer: &'a RepoPathRelativizer,
     path: &'a RepoPathBuf,
-    display: OnceCell<String>,
+    display: OnceCell<RelativizedRepoPath<'a>>,
 }
 
 impl<'a> RelativizeOnce<'a> {
@@ -294,10 +302,10 @@ impl<'a> RelativizeOnce<'a> {
         }
     }
 
-    fn as_str(&self) -> &str {
-        self.display
-            .get_or_init(|| self.relativizer.relativize(self.path))
-            .as_str()
+    fn display(&self) -> RelativizedRepoPath<'a> {
+        *self
+            .display
+            .get_or_init(|| self.relativizer.relativized(self.path.as_repo_path()))
     }
 }
 
@@ -461,7 +469,7 @@ impl<W: Write> Sink for StandardLineSink<'_, '_, W> {
     fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
         let line_number = mat.line_number();
         let line = mat.bytes();
-        let path = self.path.as_str();
+        let path = self.path.display();
 
         if self.invert_match || self.writer.match_style.is_empty() {
             self.writer
@@ -489,7 +497,7 @@ impl<W: Write> Sink for StandardLineSink<'_, '_, W> {
         context: &SinkContext<'_>,
     ) -> Result<bool, Self::Error> {
         self.writer.write_context_line(
-            self.path.as_str(),
+            self.path.display(),
             context.line_number(),
             context.bytes(),
         )?;
@@ -519,7 +527,7 @@ impl<W: Write> Sink for StandardLineSink<'_, '_, W> {
             searcher.binary_detection().quit_byte(),
         ) {
             self.writer.write_binary_quit_warning(
-                self.path.as_str(),
+                self.path.display(),
                 quit_byte,
                 binary_byte_offset,
             )?;
@@ -548,7 +556,7 @@ impl<W: Write> Sink for FileMatchLineSink<'_, '_, W> {
     type Error = io::Error;
 
     fn matched(&mut self, _searcher: &Searcher, _mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
-        self.writer.write_file_match(self.path.as_str())?;
+        self.writer.write_file_match(self.path.display())?;
         self.has_match = true;
         Ok(false)
     }
@@ -1165,7 +1173,7 @@ pub(crate) fn grep_files_json(
                 }
                 if file_has_match {
                     json_out.write(&GrepFileMatch {
-                        path: display_path.as_str(),
+                        path: display_path.display(),
                     })?;
                     match_count += 1;
                 }
@@ -1220,7 +1228,7 @@ impl Sink for JsonWriteSink<'_, '_> {
         let text = text.trim_end_matches('\n');
 
         self.json_out.write(&GrepMatch {
-            path: self.path.as_str(),
+            path: self.path.display(),
             line_number,
             text,
         })?;

@@ -34,14 +34,17 @@
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::ffi::OsStr;
 use std::fmt;
 use std::ops::Deref;
+use std::path::MAIN_SEPARATOR_STR;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::Utf8Error;
 
 use ref_cast::RefCastCustom;
 use ref_cast::ref_cast_custom;
+use serde::Serializer;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 use thiserror::Error;
@@ -322,6 +325,10 @@ impl RepoPath {
 
     /// Constructs a `RepoPath` from a `str` slice. It will fail when the string does not respect
     /// the `RepoPath` rules.
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "RepoPath is a borrowed DST, so this constructor cannot return Self by value"
+    )]
     pub fn from_str(s: &str) -> Result<&RepoPath, ParseError> {
         validate_path(s).map_err(|e| ParseError::ValidationError(s.to_string(), e))?;
         Ok(unsafe { RepoPath::from_str_unchecked(s) })
@@ -729,6 +736,10 @@ impl PathComponent {
 
     /// Constructs a `PathComponent` from a `str` slice. It will fail when the string does not
     /// respect the `PathComponent` rules.
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "PathComponent is a borrowed DST, so this constructor cannot return Self by value"
+    )]
     pub fn from_str(s: &str) -> Result<&PathComponent, ParseError> {
         validate_component(s.as_bytes())
             .map_err(|e| ParseError::ValidationError(s.to_string(), e))?;
@@ -1008,7 +1019,7 @@ enum RepoPathRelativizerConfig {
 
     // If the cwd is outside the repo, then prefix is the cwd relative to the repo root: Hg paths
     // can simply be appended to this path.
-    CwdOutsideRepo { prefix: PathBuf },
+    CwdOutsideRepo { prefix: String },
 
     // Don't relativize. This is convenient for code that wants to sometimes relativize
     // and sometimes not.
@@ -1017,6 +1028,67 @@ enum RepoPathRelativizerConfig {
 
 pub struct RepoPathRelativizer {
     config: RepoPathRelativizerConfig,
+}
+
+#[derive(Clone, Copy)]
+pub enum RelativizedRepoPath<'a> {
+    Direct(&'a str),
+    OutsideRepo { prefix: &'a str, path: &'a str },
+    UnderRepo { up_levels: usize, suffix: &'a str },
+}
+
+impl fmt::Display for RelativizedRepoPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RelativizedRepoPath::Direct(path) => write_repo_path_with_os_separators(f, path),
+            RelativizedRepoPath::OutsideRepo { prefix, path } => {
+                f.write_str(prefix)?;
+                if !prefix.is_empty() && !path.is_empty() {
+                    f.write_str(MAIN_SEPARATOR_STR)?;
+                }
+                write_repo_path_with_os_separators(f, path)
+            }
+            RelativizedRepoPath::UnderRepo { up_levels, suffix } => {
+                if *up_levels == 0 {
+                    return write_repo_path_with_os_separators(f, suffix);
+                }
+                f.write_str("..")?;
+                for _ in 1..*up_levels {
+                    f.write_str(MAIN_SEPARATOR_STR)?;
+                    f.write_str("..")?;
+                }
+                if !suffix.is_empty() {
+                    f.write_str(MAIN_SEPARATOR_STR)?;
+                    write_repo_path_with_os_separators(f, suffix)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn write_repo_path_with_os_separators(f: &mut fmt::Formatter<'_>, path: &str) -> fmt::Result {
+    let mut components = path.split(SEPARATOR);
+
+    if let Some(component) = components.next() {
+        f.write_str(component)?;
+    }
+
+    for component in components {
+        f.write_str(MAIN_SEPARATOR_STR)?;
+        f.write_str(component)?;
+    }
+
+    Ok(())
+}
+
+impl serde::Serialize for RelativizedRepoPath<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
 }
 
 /// Utility for computing a relativized path for a file in an Hg repository given the user's cwd
@@ -1042,7 +1114,7 @@ impl RepoPathRelativizer {
             }
         } else {
             CwdOutsideRepo {
-                prefix: util::path::relativize(cwd, repo_root),
+                prefix: util::path::relativize(cwd, repo_root).display().to_string(),
             }
         };
         RepoPathRelativizer { config }
@@ -1055,22 +1127,63 @@ impl RepoPathRelativizer {
         }
     }
 
+    /// Return a lazily formatted relativized path suitable for display.
+    pub fn relativized<'a>(&'a self, path: &'a RepoPath) -> RelativizedRepoPath<'a> {
+        match &self.config {
+            RepoPathRelativizerConfig::NoCwd => RelativizedRepoPath::Direct(path.as_str()),
+            RepoPathRelativizerConfig::CwdOutsideRepo { prefix } => {
+                RelativizedRepoPath::OutsideRepo {
+                    prefix: prefix.as_str(),
+                    path: path.as_str(),
+                }
+            }
+            RepoPathRelativizerConfig::CwdUnderRepo { relative_cwd } => {
+                relativize_under_repo(relative_cwd, path)
+            }
+        }
+    }
+
     /// Relativize the [`RepoPath`]. Returns a String that is suitable for display to the user.
     pub fn relativize(&self, path: impl AsRef<RepoPath>) -> String {
-        fn inner(relativizer: &RepoPathRelativizer, path: &RepoPath) -> String {
-            // TODO: directly operate on the RepoPath components.
-            let path = path.to_path();
+        self.relativized(path.as_ref()).to_string()
+    }
+}
 
-            use self::RepoPathRelativizerConfig::*;
-            let output = match &relativizer.config {
-                CwdUnderRepo { relative_cwd } => util::path::relativize(relative_cwd, &path),
-                CwdOutsideRepo { prefix } => prefix.join(path),
-                NoCwd => path,
-            };
-            output.display().to_string()
+fn relativize_under_repo<'a>(relative_cwd: &Path, path: &'a RepoPath) -> RelativizedRepoPath<'a> {
+    let path_str = path.as_str();
+    let mut suffix_start = 0;
+    let mut cwd_iter = relative_cwd.iter();
+    let mut path_iter = path.components();
+
+    loop {
+        match (cwd_iter.next(), path_iter.next()) {
+            (Some(cwd_component), Some(path_component))
+                if cwd_component == OsStr::new(path_component.as_str()) =>
+            {
+                suffix_start += path_component.as_str().len();
+                if suffix_start < path_str.len() {
+                    suffix_start += 1;
+                }
+            }
+            (Some(_), Some(_)) => {
+                return RelativizedRepoPath::UnderRepo {
+                    up_levels: 1 + cwd_iter.count(),
+                    suffix: &path_str[suffix_start..],
+                };
+            }
+            (Some(_), None) => {
+                return RelativizedRepoPath::UnderRepo {
+                    up_levels: 1 + cwd_iter.count(),
+                    suffix: "",
+                };
+            }
+            (None, Some(_)) | (None, None) => {
+                return RelativizedRepoPath::UnderRepo {
+                    up_levels: 0,
+                    suffix: &path_str[suffix_start..],
+                };
+            }
         }
-
-        inner(self, path.as_ref())
     }
 }
 
@@ -1536,8 +1649,8 @@ mod tests {
 
     #[test]
     fn test_relativize_path_from_repo_when_cwd_is_repo_root() {
-        let repo_root = Path::new("/home/zuck/tfb");
-        let cwd = Path::new("/home/zuck/tfb");
+        let repo_root = Path::new("/home/user/tfb");
+        let cwd = Path::new("/home/user/tfb");
         let relativizer = RepoPathRelativizer::new(cwd, repo_root);
         let check = |path, expected| {
             assert_eq!(relativizer.relativize(repo_path(path)), expected);
@@ -1547,8 +1660,8 @@ mod tests {
 
     #[test]
     fn test_relativize_path_from_repo_when_cwd_is_descendant_of_repo_root() {
-        let repo_root = Path::new("/home/zuck/tfb");
-        let cwd = Path::new("/home/zuck/tfb/foo");
+        let repo_root = Path::new("/home/user/tfb");
+        let cwd = Path::new("/home/user/tfb/foo");
         let relativizer = RepoPathRelativizer::new(cwd, repo_root);
         let check = |path, expected| {
             assert_eq!(relativizer.relativize(repo_path(path)), expected);
@@ -1558,8 +1671,8 @@ mod tests {
 
     #[test]
     fn test_relativize_path_from_repo_when_cwd_is_ancestor_of_repo_root() {
-        let repo_root = PathBuf::from("/home/zuck/tfb");
-        let cwd = PathBuf::from("/home/zuck");
+        let repo_root = PathBuf::from("/home/user/tfb");
+        let cwd = PathBuf::from("/home/user");
         let relativizer = RepoPathRelativizer::new(cwd, repo_root);
         let check = |path, expected| {
             assert_eq!(relativizer.relativize(repo_path(path)), expected);
@@ -1569,13 +1682,13 @@ mod tests {
 
     #[test]
     fn test_relativize_path_from_repo_when_cwd_is_cousin_of_repo_root() {
-        let relativizer = RepoPathRelativizer::new("/home/schrep/tfb", "/home/zuck/tfb");
+        let relativizer = RepoPathRelativizer::new("/home/other/tfb", "/home/user/tfb");
         let check = |path, expected| {
             assert_eq!(relativizer.relativize(repo_path(path)), expected);
         };
         check(
             "foo/bar.txt",
-            os_path(&["..", "..", "zuck", "tfb", "foo", "bar.txt"]),
+            os_path(&["..", "..", "user", "tfb", "foo", "bar.txt"]),
         );
     }
 
@@ -1586,6 +1699,52 @@ mod tests {
         assert_eq!(
             relativizer.relativize(repo_path("foo/bar")),
             if cfg!(windows) { r"foo\bar" } else { "foo/bar" }
+        );
+    }
+
+    #[test]
+    fn test_relativized_display_matches_relativize_when_path_equals_cwd() {
+        let repo_root = Path::new("/home/user/tfb");
+        let cwd = Path::new("/home/user/tfb/foo");
+        let relativizer = RepoPathRelativizer::new(cwd, repo_root);
+        let path = repo_path("foo");
+
+        assert_eq!(format!("{}", relativizer.relativized(path)), "");
+        assert_eq!(
+            format!("{}", relativizer.relativized(path)),
+            relativizer.relativize(path)
+        );
+    }
+
+    #[test]
+    fn test_relativized_display_matches_relativize_for_parent_of_cwd() {
+        let repo_root = Path::new("/home/user/tfb");
+        let cwd = Path::new("/home/user/tfb/foo/bar");
+        let relativizer = RepoPathRelativizer::new(cwd, repo_root);
+        let path = repo_path("foo");
+
+        assert_eq!(
+            format!("{}", relativizer.relativized(path)),
+            os_path(&[".."])
+        );
+        assert_eq!(
+            format!("{}", relativizer.relativized(path)),
+            relativizer.relativize(path)
+        );
+    }
+
+    #[test]
+    fn test_relativized_display_matches_relativize_outside_repo() {
+        let relativizer = RepoPathRelativizer::new("/home/user", "/home/user/tfb");
+        let path = repo_path("foo/bar.txt");
+
+        assert_eq!(
+            format!("{}", relativizer.relativized(path)),
+            os_path(&["tfb", "foo", "bar.txt"])
+        );
+        assert_eq!(
+            format!("{}", relativizer.relativized(path)),
+            relativizer.relativize(path)
         );
     }
 

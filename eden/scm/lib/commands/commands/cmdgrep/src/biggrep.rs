@@ -270,7 +270,7 @@ pub fn try_biggrep(
                     lineno,
                     context,
                 } => {
-                    let rel_path = relativizer.relativize(&repo_path);
+                    let rel_path = relativizer.relativized(repo_path.as_repo_path());
                     if files_with_matches {
                         json_out.write(&GrepFileMatch { path: &rel_path })?;
                     } else {
@@ -324,7 +324,7 @@ pub fn try_biggrep(
                     lineno,
                     context,
                 } => {
-                    let rel_path = relativizer.relativize(&repo_path);
+                    let rel_path = relativizer.relativized(repo_path.as_repo_path());
                     if files_with_matches {
                         out.write_file_match(&rel_path)?;
                     } else {
@@ -342,7 +342,7 @@ pub fn try_biggrep(
                     match_count += 1;
                 }
                 BigGrepLine::BinaryMatch { repo_path } => {
-                    let rel_path = relativizer.relativize(&repo_path);
+                    let rel_path = relativizer.relativized(repo_path.as_repo_path());
                     out.write_binary_match(&rel_path)?;
                     match_count += 1;
                 }

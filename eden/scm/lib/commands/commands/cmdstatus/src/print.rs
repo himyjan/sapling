@@ -95,7 +95,7 @@ impl HgStatusPathRelativizer {
 
         let out = match self.relativizer {
             Some(ref relativizer) => {
-                let os_sep_path = relativizer.relativize(repo_path);
+                let os_sep_path = relativizer.relativized(repo_path).to_string();
                 match self.slash {
                     PlatformDefault | BuggyRust => os_sep_path,
                     ForwardSlash => {

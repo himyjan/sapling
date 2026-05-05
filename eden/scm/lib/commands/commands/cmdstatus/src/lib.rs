@@ -246,13 +246,16 @@ pub fn run(ctx: ReqCtx<StatusOpts>, repo: &Repo, wc: &WorkingCopy) -> Result<u8>
                 {
                     lgr.warn(format!(
                         "{}: invalid file type",
-                        relativizer.relativize(file)
+                        relativizer.relativized(file.as_repo_path())
                     ));
                 }
             }
             Err(err) => {
                 if !status.contains(file) {
-                    lgr.warn(format!("{}: {err}", relativizer.relativize(file)));
+                    lgr.warn(format!(
+                        "{}: {err}",
+                        relativizer.relativized(file.as_repo_path())
+                    ));
                 }
             }
         }
