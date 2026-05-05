@@ -7,6 +7,7 @@
 
 #![feature(impl_trait_in_fn_trait_return)]
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::IsTerminal;
@@ -51,6 +52,9 @@ mod util;
 // Used to determine whether we should gate off certain oxidized edenfsctl commands
 const ROLLOUT_JSON: &str = "edenfsctl_rollout.json";
 const EXPERIMENTAL_COMMANDS: &[&str] = &["glob", "prefetch", "remove"];
+const CONFIG_DIR_ENV_VAR: &str = "EDENFSCTL_CONFIG_DIR";
+const ETC_EDEN_DIR_ENV_VAR: &str = "EDENFSCTL_ETC_EDEN_DIR";
+const HOME_DIR_ENV_VAR: &str = "EDENFSCTL_HOME_DIR";
 
 // We create a single EdenFsInstance when starting up
 static EDENFS_INSTANCE: OnceLock<EdenFsInstance> = OnceLock::new();
@@ -86,6 +90,18 @@ fn init_edenfs_instance(
 
 type ExitCode = i32;
 
+fn get_global_path_default(
+    env_var: &str,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> Option<PathBuf> {
+    let value = get_env(env_var)?;
+    if value.is_empty() {
+        return None;
+    }
+
+    Some(expand_path(value))
+}
+
 #[derive(Parser, Debug)]
 #[clap(
     name = "edenfsctl",
@@ -94,15 +110,18 @@ type ExitCode = i32;
     next_help_heading = "GLOBAL OPTIONS"
 )]
 pub struct MainCommand {
-    /// Path to directory where edenfs stores its internal state
+    /// Path to directory where edenfs stores its internal state.
+    /// Defaults to $EDENFSCTL_CONFIG_DIR when set.
     #[clap(global = true, long, value_parser = |s: &str| -> Result<PathBuf, std::convert::Infallible> { Ok(expand_path(s)) })]
     config_dir: Option<PathBuf>,
 
-    /// Path to directory that holds the system configuration files
+    /// Path to directory that holds the system configuration files.
+    /// Defaults to $EDENFSCTL_ETC_EDEN_DIR when set.
     #[clap(global = true, long, value_parser = |s: &str| -> Result<PathBuf, std::convert::Infallible> { Ok(expand_path(s)) })]
     etc_eden_dir: Option<PathBuf>,
 
-    /// Path to directory where .edenrc config file is stored
+    /// Path to directory where .edenrc config file is stored.
+    /// Defaults to $EDENFSCTL_HOME_DIR when set.
     #[clap(global = true, long, value_parser = |s: &str| -> Result<PathBuf, std::convert::Infallible> { Ok(expand_path(s)) })]
     home_dir: Option<PathBuf>,
 
@@ -251,6 +270,51 @@ impl Subcommand for TopLevelSubcommand {
 }
 
 impl MainCommand {
+    /// Parse the process command line and apply env defaults for global path flags.
+    pub fn parse() -> Self {
+        Self::try_parse().unwrap_or_else(|e| e.exit())
+    }
+
+    /// Parse the process command line and apply env defaults for global path flags.
+    pub fn try_parse() -> clap::error::Result<Self> {
+        <Self as clap::Parser>::try_parse().map(Self::apply_process_env_defaults)
+    }
+
+    /// Parse arguments and apply env defaults for global path flags.
+    pub fn parse_from<I, T>(itr: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Self::try_parse_from(itr).unwrap_or_else(|e| e.exit())
+    }
+
+    /// Parse arguments and apply env defaults for global path flags.
+    pub fn try_parse_from<I, T>(itr: I) -> clap::error::Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        <Self as clap::Parser>::try_parse_from(itr).map(Self::apply_process_env_defaults)
+    }
+
+    fn apply_process_env_defaults(self) -> Self {
+        self.apply_env_defaults(|key| std::env::var(key).ok())
+    }
+
+    fn apply_env_defaults(mut self, get_env: impl Fn(&str) -> Option<String>) -> Self {
+        if self.config_dir.is_none() {
+            self.config_dir = get_global_path_default(CONFIG_DIR_ENV_VAR, &get_env);
+        }
+        if self.etc_eden_dir.is_none() {
+            self.etc_eden_dir = get_global_path_default(ETC_EDEN_DIR_ENV_VAR, &get_env);
+        }
+        if self.home_dir.is_none() {
+            self.home_dir = get_global_path_default(HOME_DIR_ENV_VAR, &get_env);
+        }
+        self
+    }
+
     fn set_working_directory(&self) -> Result<()> {
         if let Some(checkout_dir) = &self.checkout_dir {
             std::env::set_current_dir(checkout_dir).with_context(|| {
@@ -342,4 +406,88 @@ fn is_command_enabled_in_json(name: &str, etc_eden_dir_override: &Option<PathBuf
     let map = json.as_object()?;
 
     map.get(name).and_then(|v| v.as_bool())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn fake_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        move |key| map.get(key).cloned()
+    }
+
+    #[test]
+    fn parser_reads_global_paths_from_env() {
+        let cmd = <MainCommand as clap::Parser>::try_parse_from(["edenfsctl", "status"])
+            .expect("parser should succeed")
+            .apply_env_defaults(fake_env(&[
+                (CONFIG_DIR_ENV_VAR, "/env/config"),
+                (ETC_EDEN_DIR_ENV_VAR, "/env/etc"),
+                (HOME_DIR_ENV_VAR, "/env/home"),
+            ]));
+
+        assert_eq!(cmd.config_dir, Some(PathBuf::from("/env/config")));
+        assert_eq!(cmd.etc_eden_dir, Some(PathBuf::from("/env/etc")));
+        assert_eq!(cmd.home_dir, Some(PathBuf::from("/env/home")));
+    }
+
+    #[test]
+    fn parser_prefers_explicit_global_options_over_env() {
+        let cmd = <MainCommand as clap::Parser>::try_parse_from([
+            "edenfsctl",
+            "--config-dir",
+            "/flag/config",
+            "--etc-eden-dir",
+            "/flag/etc",
+            "--home-dir",
+            "/flag/home",
+            "status",
+        ])
+        .expect("parser should succeed")
+        .apply_env_defaults(fake_env(&[
+            (CONFIG_DIR_ENV_VAR, "/env/config"),
+            (ETC_EDEN_DIR_ENV_VAR, "/env/etc"),
+            (HOME_DIR_ENV_VAR, "/env/home"),
+        ]));
+
+        assert_eq!(cmd.config_dir, Some(PathBuf::from("/flag/config")));
+        assert_eq!(cmd.etc_eden_dir, Some(PathBuf::from("/flag/etc")));
+        assert_eq!(cmd.home_dir, Some(PathBuf::from("/flag/home")));
+    }
+
+    #[test]
+    fn empty_env_values_are_treated_as_unset() {
+        let cmd = <MainCommand as clap::Parser>::try_parse_from(["edenfsctl", "status"])
+            .expect("parser should succeed")
+            .apply_env_defaults(fake_env(&[
+                (CONFIG_DIR_ENV_VAR, ""),
+                (ETC_EDEN_DIR_ENV_VAR, ""),
+                (HOME_DIR_ENV_VAR, ""),
+            ]));
+
+        assert_eq!(cmd.config_dir, None);
+        assert_eq!(cmd.etc_eden_dir, None);
+        assert_eq!(cmd.home_dir, None);
+    }
+
+    #[test]
+    fn env_defaults_are_expanded() {
+        let cmd = <MainCommand as clap::Parser>::try_parse_from(["edenfsctl", "status"])
+            .expect("parser should succeed")
+            .apply_env_defaults(fake_env(&[
+                (CONFIG_DIR_ENV_VAR, "~/config"),
+                (ETC_EDEN_DIR_ENV_VAR, "~/etc"),
+                (HOME_DIR_ENV_VAR, "~/home"),
+            ]));
+
+        assert_eq!(cmd.config_dir, Some(expand_path("~/config")));
+        assert_eq!(cmd.etc_eden_dir, Some(expand_path("~/etc")));
+        assert_eq!(cmd.home_dir, Some(expand_path("~/home")));
+    }
 }
