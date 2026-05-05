@@ -107,10 +107,6 @@ impl AffectedChangesets {
         &self.new_changesets
     }
 
-    pub(crate) fn source_changesets(&self) -> &HashSet<BonsaiChangeset> {
-        &self.source_changesets
-    }
-
     pub(crate) fn bypass_checks_on_additional_changesets(&mut self) {
         self.should_bypass_checks_on_additional_changesets = true;
     }
