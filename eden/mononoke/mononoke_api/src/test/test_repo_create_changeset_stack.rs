@@ -122,9 +122,8 @@ async fn create_changesets_sequentially<R: MononokeRepo>(
     let bubble = None;
     let git_extra_headers = None;
     let mut parents = stack_parents;
-    let mut change_num = 1;
     let mut result = Vec::new();
-    for changes in changes_stack {
+    for (change_num, changes) in (1..).zip(changes_stack) {
         let info = CreateInfo {
             author: author.clone(),
             author_date,
@@ -150,7 +149,6 @@ async fn create_changesets_sequentially<R: MononokeRepo>(
             .changeset_ctx;
         parents = vec![commit.id()];
         result.push(commit);
-        change_num += 1;
     }
     Ok(result)
 }
