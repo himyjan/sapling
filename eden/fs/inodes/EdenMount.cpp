@@ -1150,7 +1150,7 @@ void EdenMount::updateInodePressurePolicy() {
       std::chrono::seconds{gcCutoffMin});
 
   XLOGF(
-      DBG2,
+      DBG4,
       "Updated InodePressurePolicy for {}: "
       "inodes=[{}, {}], fuseTtl=[{}s, {}s], gcCutoff=[{}s, {}s]",
       getPath(),
