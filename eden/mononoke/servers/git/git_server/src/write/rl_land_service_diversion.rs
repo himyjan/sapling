@@ -49,6 +49,22 @@ use crate::service::GitObjectStore;
 /// The SMC tier name for the RL Land Service.
 const RL_LAND_SERVICE_TIER: &str = "scm.grepo.aosp-service.prod";
 
+/// Per-attempt server processing budget for `AospService` calls.
+///
+/// The AospService SMC tier (`scm.grepo.aosp-service.prod`) does not
+/// currently publish a ServiceRouter routing config, so SR clients fall
+/// back to a global default of ~140 ms — too short for `submitLand` /
+/// `getLandStatus`, which can take minutes for multi-repo CAS bookmark
+/// moves with concurrent hook runs. Setting this client-side means our
+/// explicit override remains in effect even if the AospService team
+/// later publishes a routing config.
+const RL_LAND_THRIFT_PROCESSING_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Total client-side wall-clock budget across all SR retries for a single
+/// `AospService` call. Sized to allow at least one retry within the
+/// 5-minute per-attempt budget above.
+const RL_LAND_THRIFT_OVERALL_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Check whether this push should be diverted to the RL Land Service.
 ///
 /// Repos whose name matches the `rl_land_service_repo_prefix` in
@@ -185,7 +201,9 @@ pub async fn fire_and_forget_submit_land(
     };
 
     let client = match client_result {
-        Ok(c) => c,
+        Ok(c) => c
+            .with_processing_timeout(RL_LAND_THRIFT_PROCESSING_TIMEOUT)
+            .with_overall_timeout(RL_LAND_THRIFT_OVERALL_TIMEOUT),
         Err(e) => {
             error!(
                 "Emergency push for repo {}: failed to create RL Land Service client: {:#}",
@@ -290,7 +308,9 @@ pub async fn divert_to_rl_land_service(
             RL_LAND_SERVICE_TIER.to_string(),
             make_AospService,
         )?
-    };
+    }
+    .with_processing_timeout(RL_LAND_THRIFT_PROCESSING_TIMEOUT)
+    .with_overall_timeout(RL_LAND_THRIFT_OVERALL_TIMEOUT);
 
     // Convert diverted ref updates to DiffChange items.
     let changes: Vec<DiffChange> = diverted_refs
