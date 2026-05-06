@@ -1434,7 +1434,11 @@ impl SourceControlServiceImpl {
             }
         )?;
 
-        let limit: usize = check_range_and_convert("limit", params.limit, 0..)?;
+        let limit: usize = check_range_and_convert(
+            "limit",
+            params.limit,
+            0..=source_control::COMMIT_LINEAR_HISTORY_MAX_LIMIT,
+        )?;
         let skip: u64 = check_range_and_convert("skip", params.skip, 0..)?;
 
         let history_stream = changeset
