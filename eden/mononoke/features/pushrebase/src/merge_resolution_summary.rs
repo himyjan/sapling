@@ -113,6 +113,55 @@ impl MergeResolutionSummary {
         }
     }
 
+    /// Construct a `Succeeded` summary representing a prior MR attempt
+    /// whose original conflict count is no longer available — only the
+    /// resolved paths survived in CAS-failure-retry carry-forward state.
+    /// `conflict_files_count` is reported as 0; analysts wanting the
+    /// original count can join on the per-attempt
+    /// "Pushrebase merge resolution succeeded" Scuba sample.
+    pub fn from_carried_paths(paths: Vec<NonRootMPath>) -> Self {
+        let resolved_files_count = paths.len() as u64;
+        let resolved_paths_sample = paths.into_iter().take(MR_PATH_SAMPLE_CAP).collect();
+        Self::Succeeded {
+            conflict_files_count: 0,
+            resolved_files_count,
+            resolved_paths_sample,
+        }
+    }
+
+    /// Combine two summaries from disjoint conflict-check ranges
+    /// (speculative range outside the lock + delta range inside; or
+    /// across CAS-failure retries). `Succeeded` is sticky: if either
+    /// side succeeded the combined result is `Succeeded` with summed
+    /// counts and concatenated paths capped at `MR_PATH_SAMPLE_CAP`.
+    /// Otherwise the more recent (delta) outcome wins.
+    pub fn combine(speculative: Self, delta: Self) -> Self {
+        use MergeResolutionSummary::*;
+        match (speculative, delta) {
+            (
+                Succeeded {
+                    conflict_files_count: sc,
+                    resolved_files_count: sr,
+                    resolved_paths_sample: sp,
+                },
+                Succeeded {
+                    conflict_files_count: dc,
+                    resolved_files_count: dr,
+                    resolved_paths_sample: dp,
+                },
+            ) => Succeeded {
+                conflict_files_count: sc + dc,
+                resolved_files_count: sr + dr,
+                resolved_paths_sample: sp.into_iter().chain(dp).take(MR_PATH_SAMPLE_CAP).collect(),
+            },
+            // Succeeded on either side stays sticky.
+            (s @ Succeeded { .. }, _) => s,
+            (_, d @ Succeeded { .. }) => d,
+            // No success on either side: the more recent (delta) outcome wins.
+            (_, d) => d,
+        }
+    }
+
     /// Append this summary's fields to the given Scuba sample. Always
     /// emits `mr_outcome` + `mr_conflict_files_count` +
     /// `mr_resolved_files_count`. Variant-specific fields

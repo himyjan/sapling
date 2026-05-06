@@ -228,6 +228,18 @@ fn rebased_changesets_into_pairs(
         .collect()
 }
 
+/// Adapter that bridges the carry-forward state (`Vec<MergedFileInfo>`)
+/// to `MergeResolutionSummary::from_carried_paths`. Returns `None` when
+/// no MR ran in any prior attempt; otherwise a `Succeeded` summary
+/// reconstructed from the path list.
+fn synthesize_carried_summary(carried: &[MergedFileInfo]) -> Option<MergeResolutionSummary> {
+    if carried.is_empty() {
+        return None;
+    }
+    let paths: Vec<NonRootMPath> = carried.iter().map(|info| info.path.clone()).collect();
+    Some(MergeResolutionSummary::from_carried_paths(paths))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PushrebaseRetryNum(pub usize);
 
@@ -392,6 +404,7 @@ struct PendingRebase {
     pushrebase_distance: usize,
     old_bookmark_value: Option<ChangesetId>,
     merge_resolved_paths: Option<Vec<NonRootMPath>>,
+    merge_summary: MergeResolutionSummary,
 }
 
 /// Result of a speculative (pre-lock) conflict check.
@@ -399,6 +412,7 @@ struct SpeculativeConflictResult {
     bookmark_value: ChangesetId,
     merge_info: Vec<MergedFileInfo>,
     server_changeset_count: usize,
+    merge_summary: MergeResolutionSummary,
 }
 
 /// Output of a successful rebase under lock, ready to be committed.
@@ -408,6 +422,7 @@ struct RebaseUnderLockResult {
     txn_hooks: Vec<Box<dyn PushrebaseTransactionHook>>,
     merge_resolved_paths: Option<Vec<NonRootMPath>>,
     pushrebase_distance: usize,
+    merge_summary: MergeResolutionSummary,
 }
 
 /// Lands multiple indexed stacks in a single critical section pass.
@@ -531,6 +546,16 @@ pub async fn do_batched_pushrebase(
             .as_ref()
             .map(|overrides| overrides.iter().map(|info| info.path.clone()).collect());
 
+        // The summary for a push that has been retried must reflect that
+        // MR previously succeeded — otherwise a clean delta on retry would
+        // hide a successful MR run. `carried_merge_file_info` is the
+        // signal: non-empty means an earlier attempt resolved conflicts.
+        let merge_summary = synthesize_carried_summary(&request.carried_merge_file_info)
+            .map(|carried| {
+                MergeResolutionSummary::combine(carried, conflict_result.merge_summary.clone())
+            })
+            .unwrap_or(conflict_result.merge_summary);
+
         // Store reconciled overrides on the request for carry-forward on re-queue
         request.carried_merge_file_info = reconciled_overrides.clone().unwrap_or_default();
 
@@ -581,6 +606,7 @@ pub async fn do_batched_pushrebase(
                     pushrebase_distance,
                     old_bookmark_value: request_old_bookmark_value,
                     merge_resolved_paths,
+                    merge_summary,
                 });
             }
             Err(e) => {
@@ -679,6 +705,16 @@ pub async fn do_batched_pushrebase(
                     .cloned()
                     .collect();
 
+                let mut sample = ctx.scuba().clone();
+                sample
+                    .add("repo_name", repo.repo_identity().name())
+                    .add("retry_num", p.request.retry_num.0 as i64);
+                // Clone for Scuba so the original can be moved into the
+                // returned PushrebaseOutcome below; see rebase_with_lock
+                // for the rationale.
+                p.merge_summary.clone().add_to_scuba(&mut sample);
+                sample.log_with_msg("batched_pushrebase_request_complete", None);
+
                 let _ = p.request.response_tx.send(Ok(PushrebaseOutcome {
                     old_bookmark_value: Some(p.old_bookmark_value.unwrap_or(p.request.root)),
                     head: p.new_head,
@@ -687,7 +723,7 @@ pub async fn do_batched_pushrebase(
                     pushrebase_distance: PushrebaseDistance(p.pushrebase_distance),
                     log_id,
                     merge_resolved_paths: p.merge_resolved_paths,
-                    merge_summary: None,
+                    merge_summary: Some(p.merge_summary),
                 }));
             }
             vec![]
@@ -773,6 +809,12 @@ struct ConflictCheckResult {
     /// If merge resolution succeeded, info about each merged file.
     /// `None` means no conflicts or merge resolution was not attempted.
     merged_file_overrides: Option<Vec<MergedFileInfo>>,
+    /// Merge-resolution outcome for this conflict-check attempt. Always set
+    /// on the Ok path: `NotNeeded` when there were no conflicts, `Succeeded`
+    /// when MR resolved them. Failure-path summaries are not propagated here
+    /// (the standalone "Pushrebase merge resolution failed" Scuba sample
+    /// captures them); they ride with PushrebaseError in a follow-up.
+    merge_summary: MergeResolutionSummary,
 }
 
 /// Checks for server-side conflicts against the client's pushed stack.
@@ -816,9 +858,11 @@ async fn check_pushrebase_conflicts(
         Ok(()) => Ok(ConflictCheckResult {
             server_changeset_count: server_bcs_len,
             merged_file_overrides: None,
+            merge_summary: MergeResolutionSummary::NotNeeded,
         }),
         Err(PushrebaseError::Conflicts(conflicts)) => {
             let reponame = repo.repo_identity().name();
+            let conflict_files_count = conflicts.len() as u64;
             STATS::conflict_rejections.add_value(1, (reponame.to_string(),));
             STATS::conflict_files_count.add_value(conflicts.len() as i64, (reponame.to_string(),));
 
@@ -861,11 +905,29 @@ async fn check_pushrebase_conflicts(
             };
 
             match merge_result {
-                Some(Ok(merged_changes)) => Ok(ConflictCheckResult {
-                    server_changeset_count: server_bcs_len,
-                    merged_file_overrides: Some(merged_changes),
-                }),
+                Some(Ok(merged_changes)) => {
+                    let resolved_paths_sample = merged_changes
+                        .iter()
+                        .take(MR_PATH_SAMPLE_CAP)
+                        .map(|info| info.path.clone())
+                        .collect();
+                    let merge_summary = MergeResolutionSummary::Succeeded {
+                        conflict_files_count,
+                        resolved_files_count: merged_changes.len() as u64,
+                        resolved_paths_sample,
+                    };
+                    Ok(ConflictCheckResult {
+                        server_changeset_count: server_bcs_len,
+                        merged_file_overrides: Some(merged_changes),
+                        merge_summary,
+                    })
+                }
                 _ => {
+                    // Failure-path summary is intentionally NOT propagated via
+                    // PushrebaseError::Conflicts in this diff. The existing
+                    // "Pushrebase merge resolution failed" Scuba sample captures
+                    // it; a follow-up will fold the failure summary into a
+                    // richer error variant once parity is verified.
                     if let Some(Err(ref err)) = merge_result {
                         ctx.scuba()
                             .clone()
@@ -924,6 +986,7 @@ async fn rebase_with_lock(
             .merged_file_overrides
             .unwrap_or_default(),
         server_changeset_count: speculative_conflicts.server_changeset_count,
+        merge_summary: speculative_conflicts.merge_summary,
     };
 
     // Phase 2: Acquire per-bookmark lock.
@@ -982,8 +1045,14 @@ async fn rebase_with_lock(
     let lock_hold_ms = lock_hold_start.elapsed().as_millis() as i64;
     let bookmark_moved = auth_value != Some(speculative_bv_cs);
 
-    ctx.scuba()
-        .clone()
+    // Clone the summary so the same value can be both logged to Scuba
+    // here and moved into the returned PushrebaseOutcome below. Cloning
+    // is cheap (a Vec of paths capped at MR_PATH_SAMPLE_CAP) and removes
+    // the silent foot-gun where a future change to `add_to_scuba` taking
+    // `self` would break the subsequent move.
+    let merge_summary = rebase.merge_summary.clone();
+    let mut sample = ctx.scuba().clone();
+    sample
         .add("pessimistic_lock_wait_ms", lock_wait_ms)
         .add("pessimistic_lock_hold_ms", lock_hold_ms)
         .add("pessimistic_total_ms", total_ms)
@@ -995,8 +1064,9 @@ async fn rebase_with_lock(
         .add(
             "pessimistic_rebased_changesets",
             rebase.rebased_changesets.len() as i64,
-        )
-        .log_with_msg("pessimistic_pushrebase_complete", None);
+        );
+    merge_summary.add_to_scuba(&mut sample);
+    sample.log_with_msg("pessimistic_pushrebase_complete", None);
 
     let rebased_pairs = rebased_changesets_into_pairs(rebase.rebased_changesets);
 
@@ -1008,7 +1078,7 @@ async fn rebase_with_lock(
         pushrebase_distance: PushrebaseDistance(rebase.pushrebase_distance),
         log_id: BookmarkUpdateLogId(log_id),
         merge_resolved_paths: rebase.merge_resolved_paths,
-        merge_summary: None,
+        merge_summary: Some(rebase.merge_summary),
     })
 }
 
@@ -1031,6 +1101,7 @@ async fn try_rebase_under_lock(
     })?;
 
     let mut merge_info = speculative.merge_info;
+    let mut merge_summary = speculative.merge_summary;
 
     // Phase 3: Validate and delta check.
     let pushrebase_distance = if auth_cs != speculative.bookmark_value {
@@ -1060,6 +1131,8 @@ async fn try_rebase_under_lock(
 
         let delta_overrides = delta_conflicts.merged_file_overrides.unwrap_or_default();
         merge_info = reconcile_merge_file_info(&merge_info, &delta_overrides);
+        merge_summary =
+            MergeResolutionSummary::combine(merge_summary, delta_conflicts.merge_summary);
 
         speculative.server_changeset_count + delta_conflicts.server_changeset_count
     } else {
@@ -1110,6 +1183,7 @@ async fn try_rebase_under_lock(
         txn_hooks,
         merge_resolved_paths,
         pushrebase_distance,
+        merge_summary,
     })
 }
 
@@ -1124,6 +1198,7 @@ struct SpeculativeRequestCheck {
     request: PushrebaseRequest,
     merge_info: Vec<MergedFileInfo>,
     pushrebase_distance: usize,
+    merge_summary: MergeResolutionSummary,
 }
 
 /// Batched pessimistic pushrebase: runs speculative conflict checks outside
@@ -1258,7 +1333,7 @@ async fn batched_rebase_with_lock(
                 )
                 .log_with_msg("pessimistic_batched_pushrebase_complete", None);
 
-            dispatch_batch_results(pending, log_id, &all_rebased_pairs);
+            dispatch_batch_results(ctx, repo, pending, log_id, &all_rebased_pairs);
             vec![]
         }
         Err((pending, e)) => {
@@ -1310,6 +1385,7 @@ async fn speculative_batch_check(
         };
 
         let merge_info = conflict_result.merged_file_overrides.unwrap_or_default();
+        let merge_summary = conflict_result.merge_summary;
 
         let pushrebase_distance = match try_join(
             repo.commit_graph()
@@ -1332,6 +1408,7 @@ async fn speculative_batch_check(
             request,
             merge_info,
             pushrebase_distance,
+            merge_summary,
         });
     }
 
@@ -1382,6 +1459,7 @@ async fn rebase_batch_under_lock(
         let mut request = checked.request;
         let mut merge_info = checked.merge_info;
         let mut pushrebase_distance = checked.pushrebase_distance;
+        let mut merge_summary = checked.merge_summary;
 
         // Delta conflict check: only needed if the bookmark moved between
         // speculative read and lock acquisition.
@@ -1418,6 +1496,8 @@ async fn rebase_batch_under_lock(
                 let delta_overrides = delta_result.merged_file_overrides.unwrap_or_default();
                 merge_info = reconcile_merge_file_info(&merge_info, &delta_overrides);
                 pushrebase_distance += delta_result.server_changeset_count;
+                merge_summary =
+                    MergeResolutionSummary::combine(merge_summary, delta_result.merge_summary);
             }
         }
 
@@ -1437,6 +1517,12 @@ async fn rebase_batch_under_lock(
         let merge_resolved_paths = reconciled_overrides
             .as_ref()
             .map(|overrides| overrides.iter().map(|info| info.path.clone()).collect());
+
+        // Fold in any carried summary from prior CAS-failure retries
+        // (mirrors the legacy non-pessimistic batched loop's semantics).
+        if let Some(carried) = synthesize_carried_summary(&request.carried_merge_file_info) {
+            merge_summary = MergeResolutionSummary::combine(carried, merge_summary);
+        }
 
         request.carried_merge_file_info = reconciled_overrides.clone().unwrap_or_default();
 
@@ -1465,6 +1551,7 @@ async fn rebase_batch_under_lock(
                     pushrebase_distance,
                     old_bookmark_value: request_old_bookmark_value,
                     merge_resolved_paths,
+                    merge_summary,
                 });
             }
             Err(e) => {
@@ -1570,6 +1657,8 @@ async fn save_and_commit_batch(
 }
 
 fn dispatch_batch_results(
+    ctx: &CoreContext,
+    repo: &impl PushrebaseRepo,
     pending: Vec<PendingRebase>,
     log_id: u64,
     all_rebased_pairs: &[PushrebaseChangesetPair],
@@ -1586,6 +1675,13 @@ fn dispatch_batch_results(
             .cloned()
             .collect();
 
+        let mut sample = ctx.scuba().clone();
+        sample
+            .add("repo_name", repo.repo_identity().name())
+            .add("retry_num", p.request.retry_num.0 as i64);
+        p.merge_summary.add_to_scuba(&mut sample);
+        sample.log_with_msg("batched_pushrebase_request_complete", None);
+
         let _ = p.request.response_tx.send(Ok(PushrebaseOutcome {
             old_bookmark_value: Some(p.old_bookmark_value.unwrap_or(p.request.root)),
             head: p.new_head,
@@ -1594,7 +1690,7 @@ fn dispatch_batch_results(
             pushrebase_distance: PushrebaseDistance(p.pushrebase_distance),
             log_id: BookmarkUpdateLogId(log_id),
             merge_resolved_paths: p.merge_resolved_paths,
-            merge_summary: None,
+            merge_summary: Some(p.merge_summary),
         }));
     }
 }
@@ -1628,6 +1724,7 @@ async fn rebase_in_loop(
     let mut latest_rebase_attempt = root;
     let mut carried_merge_file_info: Vec<MergedFileInfo> = Vec::new();
     let mut total_pushrebase_distance: usize = 0;
+    let mut accumulated_merge_summary = MergeResolutionSummary::NotNeeded;
     for retry_num in 0..MAX_REBASE_ATTEMPTS {
         let retry_num = PushrebaseRetryNum(retry_num);
 
@@ -1661,6 +1758,12 @@ async fn rebase_in_loop(
         // narrow-range scan only covers the delta since the last attempt.
         total_pushrebase_distance += conflict_result.server_changeset_count;
         let pushrebase_distance = PushrebaseDistance(total_pushrebase_distance);
+        // Accumulate the per-attempt summary so the final outcome reflects
+        // any MR success across the retry chain (Succeeded is sticky).
+        accumulated_merge_summary = MergeResolutionSummary::combine(
+            accumulated_merge_summary,
+            conflict_result.merge_summary,
+        );
 
         // Reconcile carried info with delta info from this attempt
         let reconciled_overrides = match conflict_result.merged_file_overrides {
@@ -1734,6 +1837,18 @@ async fn rebase_in_loop(
                 STATS::commits_rebased
                     .add_value(rebased_changesets.len() as i64, repo_args.clone());
             }
+            // Per-push Scuba sample so `mr_outcome` is queryable on every
+            // pushrebase outcome, not only the pessimistic/batched paths.
+            // See `rebase_with_lock` for the cloning rationale.
+            let merge_summary_for_scuba = accumulated_merge_summary.clone();
+            let mut sample = ctx.scuba().clone();
+            sample
+                .add("repo_name", repo.repo_identity().name())
+                .add("retry_num", retry_num.0 as i64)
+                .add("rebased_changesets", rebased_changesets.len() as i64);
+            merge_summary_for_scuba.add_to_scuba(&mut sample);
+            sample.log_with_msg("pushrebase_complete", None);
+
             let res = PushrebaseOutcome {
                 old_bookmark_value: Some(old_bookmark_value.unwrap_or(root)),
                 head,
@@ -1742,7 +1857,7 @@ async fn rebase_in_loop(
                 pushrebase_distance,
                 log_id,
                 merge_resolved_paths,
-                merge_summary: None,
+                merge_summary: Some(accumulated_merge_summary),
             };
             return Ok(res);
         } else {
