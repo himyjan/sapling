@@ -10,6 +10,7 @@
 #include <folly/FBVector.h>
 #include <folly/MapUtil.h>
 #include <folly/coro/Collect.h>
+#include <folly/coro/Invoke.h>
 #include <folly/coro/safe/NowTask.h>
 #include <folly/functional/Invoke.h>
 #include <folly/futures/Future.h>
@@ -32,7 +33,7 @@ class VirtualInodeLoader {
  public:
   VirtualInodeLoader() = default;
 
-  // Arrange to load the inode for the input path
+  // Arrange to load the inode for the input path (futures interface).
   folly::SemiFuture<VirtualInode> load(RelativePathPiece path) {
     VirtualInodeLoader* parent = this;
 
@@ -50,6 +51,17 @@ class VirtualInodeLoader {
 
     parent->promises_.emplace_back();
     return parent->promises_.back().getSemiFuture();
+  }
+
+  // Arrange to load the inode for the input path (coroutine interface).
+  // Returns a pointer to this node so the caller can read the result
+  // after co_loaded() completes.
+  VirtualInodeLoader* co_load(RelativePathPiece path) {
+    VirtualInodeLoader* parent = this;
+    for (auto name : path.components()) {
+      parent = parent->getOrCreateChild(name);
+    }
+    return parent;
   }
 
   // Called to signal that a load attempt has completed.
@@ -112,6 +124,60 @@ class VirtualInodeLoader {
     return collectAllSafe(std::move(futures)).unit();
   }
 
+  // Coroutine-native version of loaded(). Recursively resolves all children
+  // via co_getOrFindChild, storing results directly in each node. Children
+  // are resolved in parallel via collectAllRange, matching the concurrency
+  // of the futures-based loaded() which uses collectAllSafe.
+  folly::coro::now_task<void> co_loaded(
+      folly::Try<VirtualInode> inodeTry,
+      RelativePathPiece path,
+      const std::shared_ptr<ObjectStore>& store,
+      const ObjectFetchContextPtr& fetchContext) {
+    result_ = inodeTry;
+
+    auto isTree = inodeTry.hasValue() ? inodeTry->isDirectory() : false;
+
+    std::vector<folly::coro::Task<void>> childTasks;
+    childTasks.reserve(children_.size());
+    for (auto& [childName, childLoader] : children_) {
+      childTasks.push_back(
+          folly::coro::co_invoke(
+              [loader = childLoader.get(),
+               &name = childName,
+               childPath = path + childName,
+               &inodeTry,
+               isTree,
+               store,
+               fetchContext =
+                   fetchContext.copy()]() -> folly::coro::Task<void> {
+                if (inodeTry.hasException()) {
+                  co_await loader->co_loaded(
+                      inodeTry, childPath, store, fetchContext);
+                } else if (!isTree) {
+                  co_await loader->co_loaded(
+                      folly::Try<VirtualInode>(
+                          folly::make_exception_wrapper<std::system_error>(
+                              ENOENT, std::generic_category())),
+                      childPath,
+                      store,
+                      fetchContext);
+                } else {
+                  auto childInodeTry = co_await folly::coro::co_awaitTry(
+                      inodeTry.value().co_getOrFindChild(
+                          name, childPath, store, fetchContext));
+                  co_await loader->co_loaded(
+                      std::move(childInodeTry), childPath, store, fetchContext);
+                }
+              }));
+    }
+    co_await folly::coro::collectAllRange(std::move(childTasks));
+  }
+
+  // Access the resolved result after co_loaded() completes.
+  const folly::Try<VirtualInode>& result() const {
+    return result_;
+  }
+
  private:
   // Any child nodes that we need to load.  We have to use a unique_ptr
   // for this to avoid creating a self-referential type and fail to
@@ -119,8 +185,10 @@ class VirtualInodeLoader {
   // a stable address for the contents of the VirtualInodeLoader.
   PathMap<std::unique_ptr<VirtualInodeLoader>> children_{
       CaseSensitivity::Sensitive};
-  // promises for the inode load attempts
+  // promises for the inode load attempts (futures interface)
   std::vector<folly::Promise<VirtualInode>> promises_;
+  // resolved result (coroutine interface, populated by co_loaded)
+  folly::Try<VirtualInode> result_;
 
   // Helper for building out the plan during parsing
   VirtualInodeLoader* getOrCreateChild(PathComponentPiece name) {
@@ -193,10 +261,10 @@ auto applyToVirtualInode(
 }
 
 /**
- * Coroutine-native version of applyToVirtualInode. Uses the same
- * VirtualInodeLoader for efficient tree-shaped path resolution, but applies
- * func via co_await instead of deferValue/collectAll. func may return a
- * SemiFuture<T> or now_task<T> — anything co_awaitable.
+ * Coroutine-native version of applyToVirtualInode. Uses VirtualInodeLoader's
+ * co_load/co_loaded interface for tree-shaped path resolution via
+ * co_getOrFindChild — no promises, SemiFutures, or .semi() bridges. func may
+ * return anything co_awaitable (SemiFuture<T>, now_task<T>, etc.).
  *
  * Both inode resolution and func application are parallelized: resolution
  * via the loader's tree-shaped plan, func via collectAllRange.
@@ -219,51 +287,54 @@ co_applyToVirtualInode(
   // Func may not be copyable, so wrap it in a shared_ptr.
   auto cb = std::make_shared<Func>(std::move(func));
 
-  // Set up load futures for each path. If path parsing fails, store a failed
-  // SemiFuture so the error appears in the corresponding result entry.
-  std::vector<folly::SemiFuture<VirtualInode>> loadFutures;
-  std::vector<RelativePath> relPaths;
-  loadFutures.reserve(paths.size());
-  relPaths.reserve(paths.size());
+  // Build the load plan. Each entry is either a pointer to a loader node
+  // (for valid paths) or an exception (for invalid paths).
+  struct PathEntry {
+    detail::VirtualInodeLoader* node{nullptr};
+    RelativePath path;
+    folly::exception_wrapper error;
+  };
+  std::vector<PathEntry> entries;
+  entries.reserve(paths.size());
   for (const auto& path : paths) {
+    PathEntry entry;
     try {
       auto relPath = RelativePathPiece{path};
-      loadFutures.push_back(loader.load(relPath));
-      relPaths.push_back(relPath.copy());
+      entry.node = loader.co_load(relPath);
+      entry.path = relPath.copy();
     } catch (const std::exception&) {
-      loadFutures.push_back(
-          folly::makeSemiFuture<VirtualInode>(
-              folly::exception_wrapper(std::current_exception())));
-      relPaths.emplace_back();
+      entry.error = folly::exception_wrapper(std::current_exception());
     }
+    entries.push_back(std::move(entry));
   }
 
-  // Resolve all inodes via the loader's tree-shaped plan.
-  co_await loader
-      .loaded(
-          folly::Try<VirtualInode>(VirtualInode{std::move(rootInode)}),
-          RelativePath(),
-          store,
-          fetchContext)
-      .semi();
+  // Resolve all inodes via the coroutine loader.
+  co_await loader.co_loaded(
+      folly::Try<VirtualInode>(VirtualInode{std::move(rootInode)}),
+      RelativePath(),
+      store,
+      fetchContext);
 
   // Apply func to each resolved inode in parallel.
   std::vector<folly::coro::Task<folly::Try<Result>>> tasks;
-  tasks.reserve(loadFutures.size());
-  for (size_t i = 0; i < loadFutures.size(); ++i) {
+  tasks.reserve(entries.size());
+  for (auto& entry : entries) {
     tasks.push_back(
         folly::coro::co_invoke(
             [cb,
-             loadFuture = std::move(loadFutures[i]),
-             path = std::move(relPaths[i])]() mutable
+             node = entry.node,
+             path = std::move(entry.path),
+             error = std::move(entry.error)]() mutable
                 -> folly::coro::Task<folly::Try<Result>> {
-              auto inodeTry =
-                  co_await folly::coro::co_awaitTry(std::move(loadFuture));
+              if (error) {
+                co_return folly::Try<Result>(std::move(error));
+              }
+              auto& inodeTry = node->result();
               if (inodeTry.hasException()) {
                 co_return folly::Try<Result>(inodeTry.exception());
               }
               co_return co_await folly::coro::co_awaitTry(
-                  (*cb)(std::move(inodeTry.value()), std::move(path)));
+                  (*cb)(inodeTry.value(), std::move(path)));
             }));
   }
 
