@@ -188,7 +188,7 @@ pub async fn fire_and_forget_submit_land(
         Ok(c) => c,
         Err(e) => {
             error!(
-                "Emergency push for repo {}: failed to create RL Land Service client: {}",
+                "Emergency push for repo {}: failed to create RL Land Service client: {:#}",
                 repo_name, e,
             );
             return;
@@ -208,7 +208,7 @@ pub async fn fire_and_forget_submit_land(
         Ok(s) => s,
         Err(e) => {
             error!(
-                "Emergency push for repo {}: failed to get service client: {}",
+                "Emergency push for repo {}: failed to get service client: {:#}",
                 repo_name, e,
             );
             return;
@@ -224,7 +224,7 @@ pub async fn fire_and_forget_submit_land(
         }
         Err(e) => {
             error!(
-                "Emergency push for repo {}: RL Land Service submitLand failed (best-effort): {}",
+                "Emergency push for repo {}: RL Land Service submitLand failed (best-effort): {:#}",
                 repo_name, e,
             );
         }
@@ -357,11 +357,10 @@ pub async fn divert_to_rl_land_service(
                     });
                 }
             }
-            anyhow::bail!(
-                "RL Land Service submitLand failed for repo {}: {}",
-                repo_name,
-                e
-            );
+            return Err(e).context(format!(
+                "RL Land Service submitLand failed for repo {}",
+                repo_name
+            ));
         }
     };
 
@@ -383,13 +382,15 @@ pub async fn divert_to_rl_land_service(
             ..Default::default()
         };
 
-        let status_response = service.getLandStatus(&status_request).await.map_err(|e| {
-            anyhow::anyhow!(
-                "RL Land Service getLandStatus failed for repo {}: {}",
-                repo_name,
-                e
-            )
-        })?;
+        let status_response = service
+            .getLandStatus(&status_request)
+            .await
+            .with_context(|| {
+                format!(
+                    "RL Land Service getLandStatus failed for repo {}",
+                    repo_name
+                )
+            })?;
 
         match status_response.status {
             LandStatus::COMPLETED => {
