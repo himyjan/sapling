@@ -351,7 +351,7 @@ impl<R: MononokeRepo> HgAugmentedTreeRestrictionContext<R> {
 
         let restricted_paths = self.repo_ctx.repo().restricted_paths_arc();
 
-        if !restricted_paths.has_restricted_paths() {
+        if !restricted_paths.may_have_restricted_paths() {
             return Ok(None);
         }
 

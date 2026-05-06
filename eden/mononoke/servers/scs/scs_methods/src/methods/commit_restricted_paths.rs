@@ -25,7 +25,7 @@ pub(crate) async fn restricted_paths_access_impl(
     check_permissions: bool,
 ) -> Result<thrift::CommitRestrictedPathsAccessResponse, scs_errors::ServiceError> {
     // If no restricted paths configured, return empty response
-    if !cs_ctx.has_restricted_paths() {
+    if !cs_ctx.may_have_restricted_paths() {
         return Ok(thrift::CommitRestrictedPathsAccessResponse {
             are_restricted: thrift::PathCoverage::NONE,
             has_access: thrift::PathCoverage::ALL,

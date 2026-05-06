@@ -2136,11 +2136,11 @@ impl<R: MononokeRepo> ChangesetContext<R> {
         Ok(RestrictedPathsChangesInfo { restricted_changes })
     }
 
-    /// Check if the repository has any restricted paths configured.
-    pub fn has_restricted_paths(&self) -> bool {
+    /// Check if the repository may have restricted paths.
+    pub fn may_have_restricted_paths(&self) -> bool {
         self.repo_ctx()
             .repo()
             .restricted_paths_arc()
-            .has_restricted_paths()
+            .may_have_restricted_paths()
     }
 }

@@ -128,11 +128,11 @@ impl RestrictedPaths {
         self.config_based.config()
     }
 
-    /// Returns whether any restricted paths are configured for this repository.
+    /// Returns whether this repository may have restricted paths.
     /// When `use_acl_manifest` is true, restrictions are discovered dynamically
-    /// from `.slacl` files in the repo, so we cannot short-circuit based on
-    /// the config-based `path_acls` alone.
-    pub fn has_restricted_paths(&self) -> bool {
+    /// from `.slacl` files in the repo, so callers cannot treat a false
+    /// config-only lookup as proof that no restricted paths exist.
+    pub fn may_have_restricted_paths(&self) -> bool {
         self.use_acl_manifest || self.config_based.has_restricted_paths()
     }
 
@@ -657,7 +657,7 @@ mod tests {
         let repo_restricted_paths =
             build_test_restricted_paths(fb, RestrictedPathsConfig::default()).await?;
 
-        assert!(!repo_restricted_paths.has_restricted_paths());
+        assert!(!repo_restricted_paths.may_have_restricted_paths());
 
         let ctx = CoreContext::test_mock(fb);
         let cs_id = ChangesetId::new(mononoke_types::hash::Blake2::from_byte_array([0u8; 32]));
@@ -700,7 +700,7 @@ mod tests {
 
         let repo_restricted_paths = build_test_restricted_paths(fb, config).await?;
 
-        assert!(repo_restricted_paths.has_restricted_paths());
+        assert!(repo_restricted_paths.may_have_restricted_paths());
         Ok(())
     }
 
@@ -794,7 +794,7 @@ mod tests {
         )
         .await?;
 
-        assert!(!_restricted_paths.has_restricted_paths());
+        assert!(!_restricted_paths.may_have_restricted_paths());
         Ok(())
     }
 

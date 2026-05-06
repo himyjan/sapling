@@ -109,7 +109,7 @@ pub async fn try_sync<'a>(
     ctx: &'a CoreContext,
     bcs_id: ChangesetId,
 ) -> Result<UploadStats, Error> {
-    let restricted_path_roots = if repo.restricted_paths().has_restricted_paths() {
+    let restricted_path_roots = if repo.restricted_paths().may_have_restricted_paths() {
         let bonsai: mononoke_types::BonsaiChangeset =
             bcs_id.load(ctx, &repo.repo_blobstore()).await?;
         let changed_paths: Vec<NonRootMPath> = bonsai
