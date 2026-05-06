@@ -39,7 +39,6 @@ use futures::StreamExt;
 use futures::TryStream;
 use futures::TryStreamExt;
 use futures::compat::Stream01CompatExt;
-use futures::future;
 use futures::stream;
 use futures_util::try_join;
 use hgproto::GettreepackArgs;
@@ -530,12 +529,16 @@ impl<R: MononokeRepo> HgRepoContext<R> {
             .repo_ctx()
             .location_to_changeset_id(cs_location, count)
             .await?;
-        let hg_id_futures = result_csids
-            .iter()
-            .map(|result_csid| self.repo().derive_hg_changeset(self.ctx(), *result_csid));
-        future::try_join_all(hg_id_futures)
+        stream::iter(result_csids)
+            .map(|bcs_id| async move {
+                self.repo()
+                    .derive_hg_changeset(self.ctx(), bcs_id)
+                    .await
+                    .map_err(MononokeError::from)
+            })
+            .buffered(100)
+            .try_collect()
             .await
-            .map_err(MononokeError::from)
     }
 
     /// This provides the same functionality as
