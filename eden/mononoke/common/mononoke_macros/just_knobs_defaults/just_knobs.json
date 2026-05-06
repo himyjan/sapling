@@ -69,6 +69,7 @@
     "scm/mononoke:use_acl_manifest_for_restricted_paths": true,
     "scm/metagit:mononoke_git_lfs": false,
     "scm/mononoke:lfs_server_compression_sniff_enabled": false,
+    "scm/mononoke:lfs_server_skip_upstream_for_downloads": false,
     "scm/mononoke:use_split_config_loading": false,
     "scm/mononoke:cross_repo_pause_backsyncer": false,
     "scm/mononoke:allow_bare_author_unixname": true,

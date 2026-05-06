@@ -49,6 +49,7 @@ use mononoke_types::hash::Sha256;
 use mononoke_types::typed_hash::ContentId;
 use redactedblobstore::has_redaction_root_cause;
 use repo_blobstore::RepoBlobstoreRef;
+use repo_identity::RepoIdentityRef;
 use serde::Deserialize;
 use stats::prelude::*;
 use time_ext::DurationExt;
@@ -72,6 +73,13 @@ define_stats! {
     upload_no_redirect: timeseries(Rate, Sum),
     upload_rejected: timeseries(Rate, Sum),
 }
+
+/// JustKnob that, when enabled for a repo, makes batch download responses
+/// ignore the upstream LFS server entirely. Internal-only objects are returned
+/// as usual; objects that exist only upstream become 404s. Upload paths are
+/// unaffected. Per `eden/.llms/rules/rust_unwrap_safety.md`, a bare `?` is the
+/// correct pattern here; defaults belong in `just_knobs.json`.
+const SKIP_UPSTREAM_FOR_DOWNLOADS_JK: &str = "scm/mononoke:lfs_server_skip_upstream_for_downloads";
 
 enum Source {
     Internal,
@@ -566,6 +574,25 @@ async fn batch_download(
     batch: RequestBatch,
     scuba: &mut Option<&mut ScubaMiddlewareState>,
 ) -> Result<ResponseBatch, ErrorKind> {
+    if justknobs::eval(
+        SKIP_UPSTREAM_FOR_DOWNLOADS_JK,
+        None,
+        Some(ctx.repo.repo_identity().name()),
+    )
+    .map_err(ErrorKind::Error)?
+    {
+        let internal_objects = internal_objects(ctx, &batch.objects).await?;
+        ScubaMiddlewareState::maybe_add(scuba, LfsScubaKey::BatchOrder, "skip_upstream");
+        let upstream = Ok(UpstreamObjects::NoUpstream);
+        let objects =
+            batch_download_response_objects(&batch.objects, &upstream, &internal_objects, scuba)
+                .map_err(ErrorKind::Error)?;
+        return Ok(ResponseBatch {
+            transfer: Transfer::Basic,
+            objects,
+        });
+    }
+
     let upstream = upstream_objects(ctx, &batch.objects).fuse();
     let internal = internal_objects(ctx, &batch.objects).fuse();
     pin_mut!(upstream, internal);
@@ -1204,6 +1231,51 @@ mod test {
         assert_eq!(obj1, obj);
         assert_eq!(obj2, obj);
         assert_eq!(action1, action2);
+
+        Ok(())
+    }
+
+    #[mononoke::fbinit_test]
+    async fn test_batch_download_skips_upstream_when_jk_enabled(
+        fb: FacebookInit,
+    ) -> Result<(), Error> {
+        use justknobs::test_helpers::JustKnobsInMemory;
+        use justknobs::test_helpers::KnobVal;
+        use justknobs::test_helpers::with_just_knobs_async;
+
+        // Build a repo whose LFS config enables upstream and point the context
+        // at an upstream URI. The test HTTP client is Disabled — so any actual
+        // dispatch to upstream would panic. The test passes only if the JK gate
+        // prevents that call.
+        let repo: Repo = TestRepoFactory::new(fb)?
+            .with_config_override(|c| c.lfs.use_upstream_lfs_server = true)
+            .build()
+            .await?;
+
+        let ctx = RepositoryRequestContext::test_builder_with_repo(fb, repo)?
+            .upstream_uri(Some("http://upstream.example/".to_string()))
+            .build()?;
+
+        let request = RequestBatch {
+            operation: Operation::Download,
+            r#ref: None,
+            transfers: vec![Transfer::Basic],
+            objects: vec![obj(ONES_SHA256, 111)],
+        };
+
+        let res = with_just_knobs_async(
+            JustKnobsInMemory::new(hashmap! {
+                SKIP_UPSTREAM_FOR_DOWNLOADS_JK.to_string() => KnobVal::Bool(true),
+            }),
+            Box::pin(batch_download(&ctx, request, &mut None)),
+        )
+        .await?;
+
+        assert_eq!(res.objects.len(), 1);
+        match &res.objects[0].status {
+            ObjectStatus::Err { error } => assert_eq!(error.code, 404),
+            ObjectStatus::Ok { .. } => panic!("expected 404, got Ok"),
+        }
 
         Ok(())
     }
