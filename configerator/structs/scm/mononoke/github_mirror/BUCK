@@ -1,0 +1,17 @@
+load("@fbcode_macros//build_defs:thrift_library.bzl", "thrift_library")
+
+oncall("source_control")
+
+thrift_library(
+    name = "github_mirror",
+    languages = [
+        "rust",
+    ],
+    thrift_py_options = "json",
+    thrift_rust_options = "serde",
+    thrift_srcs = {"github_mirror.thrift": None},
+    deps = [
+        "//thrift/annotation:rust",
+        "//thrift/annotation:thrift",
+    ],
+)
