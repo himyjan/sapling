@@ -15,7 +15,7 @@ crate-type = ["lib", "staticlib"]
 
 [dependencies]
 anyhow = "1.0.102"
-cxx = "1.0.119"
+cxx = "1.0.194"
 cxxerror = { version = "0.1.0", path = "cxxerror" }
 once_cell = "1.21.4"
 parking_lot = { version = "0.12.1", features = ["arc_lock", "send_guard"] }
@@ -32,7 +32,7 @@ sapling-workingcopy = { version = "0.1.0", path = "../workingcopy" }
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 
 [build-dependencies]
-cxx-build = "1.0.119"
+cxx-build = "1.0.194"
 
 [features]
 default = []

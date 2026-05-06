@@ -17,7 +17,7 @@ crate-type = ["lib", "staticlib"]
 anyhow = "1.0.102"
 arc-swap = { version = "1.9.0", features = ["weak"] }
 blob = { version = "0.1.0", path = "../blob" }
-cxx = "1.0.119"
+cxx = "1.0.194"
 cxxerror = { version = "0.1.0", path = "../edenfs_ffi/cxxerror" }
 env_logger = { version = "0.11.10", features = ["color"] }
 flume = "0.11.1"

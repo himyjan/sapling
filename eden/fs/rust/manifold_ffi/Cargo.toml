@@ -9,6 +9,6 @@ license = "GPLv2+"
 
 [dependencies]
 anyhow = "1.0.102"
-cxx = "1.0.119"
+cxx = "1.0.194"
 cxxerror = { version = "0.1.0", path = "../../../scm/lib/edenfs_ffi/cxxerror" }
 fbinit = { version = "0.2.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
