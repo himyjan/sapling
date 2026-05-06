@@ -9,6 +9,8 @@
 #include <folly/ExceptionWrapper.h>
 #include <folly/FBVector.h>
 #include <folly/MapUtil.h>
+#include <folly/coro/Collect.h>
+#include <folly/coro/safe/NowTask.h>
 #include <folly/functional/Invoke.h>
 #include <folly/futures/Future.h>
 
@@ -188,6 +190,84 @@ auto applyToVirtualInode(
       .thenValue([results = std::move(results)](auto&&) mutable {
         return folly::collectAll(std::move(results));
       });
+}
+
+/**
+ * Coroutine-native version of applyToVirtualInode. Uses the same
+ * VirtualInodeLoader for efficient tree-shaped path resolution, but applies
+ * func via co_await instead of deferValue/collectAll. func may return a
+ * SemiFuture<T> or now_task<T> — anything co_awaitable.
+ *
+ * Both inode resolution and func application are parallelized: resolution
+ * via the loader's tree-shaped plan, func via collectAllRange.
+ */
+template <typename Func>
+folly::coro::now_task<
+    std::vector<folly::Try<typename folly::isFutureOrSemiFuture<
+        folly::invoke_result_t<Func&, VirtualInode, RelativePath>>::Inner>>>
+co_applyToVirtualInode(
+    InodePtr rootInode,
+    const std::vector<std::string>& paths,
+    Func func,
+    const std::shared_ptr<ObjectStore>& store,
+    const ObjectFetchContextPtr& fetchContext) {
+  using FuncRet = folly::invoke_result_t<Func&, VirtualInode, RelativePath>;
+  using Result = typename folly::isFutureOrSemiFuture<FuncRet>::Inner;
+
+  detail::VirtualInodeLoader loader;
+
+  // Func may not be copyable, so wrap it in a shared_ptr.
+  auto cb = std::make_shared<Func>(std::move(func));
+
+  // Set up load futures for each path. If path parsing fails, store a failed
+  // SemiFuture so the error appears in the corresponding result entry.
+  std::vector<folly::SemiFuture<VirtualInode>> loadFutures;
+  std::vector<RelativePath> relPaths;
+  loadFutures.reserve(paths.size());
+  relPaths.reserve(paths.size());
+  for (const auto& path : paths) {
+    try {
+      auto relPath = RelativePathPiece{path};
+      loadFutures.push_back(loader.load(relPath));
+      relPaths.push_back(relPath.copy());
+    } catch (const std::exception&) {
+      loadFutures.push_back(
+          folly::makeSemiFuture<VirtualInode>(
+              folly::exception_wrapper(std::current_exception())));
+      relPaths.emplace_back();
+    }
+  }
+
+  // Resolve all inodes via the loader's tree-shaped plan.
+  co_await loader
+      .loaded(
+          folly::Try<VirtualInode>(VirtualInode{std::move(rootInode)}),
+          RelativePath(),
+          store,
+          fetchContext)
+      .semi();
+
+  // Apply func to each resolved inode in parallel.
+  std::vector<folly::coro::Task<folly::Try<Result>>> tasks;
+  tasks.reserve(loadFutures.size());
+  for (size_t i = 0; i < loadFutures.size(); ++i) {
+    tasks.push_back(
+        folly::coro::co_invoke(
+            [cb,
+             loadFuture = std::move(loadFutures[i]),
+             path = std::move(relPaths[i])]() mutable
+                -> folly::coro::Task<folly::Try<Result>> {
+              auto inodeTry =
+                  co_await folly::coro::co_awaitTry(std::move(loadFuture));
+              if (inodeTry.hasException()) {
+                co_return folly::Try<Result>(inodeTry.exception());
+              }
+              co_return co_await folly::coro::co_awaitTry(
+                  (*cb)(std::move(inodeTry.value()), std::move(path)));
+            }));
+  }
+
+  co_return co_await folly::coro::collectAllRange(std::move(tasks));
 }
 
 } // namespace facebook::eden

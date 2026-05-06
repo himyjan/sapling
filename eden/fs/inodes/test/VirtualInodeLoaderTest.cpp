@@ -6,6 +6,7 @@
  */
 
 #include "eden/fs/inodes/VirtualInodeLoader.h"
+#include <folly/coro/GtestHelpers.h>
 #include <folly/test/TestUtils.h>
 #include <folly/testing/TestUtil.h>
 #include <gtest/gtest.h>
@@ -130,5 +131,80 @@ TEST(InodeLoader, notReady) {
     EXPECT_THROW_ERRNO(results[1].value(), ENOENT);
     EXPECT_THROW_ERRNO(results[2].value(), ENOENT);
     EXPECT_EQ(Hash20::sha1("dir/sub/b.txt"), results[3].value());
+  }
+}
+
+CO_TEST(CoInodeLoader, load) {
+  FakeTreeBuilder builder;
+  builder.setFiles(FILES);
+  TestMount mount(builder);
+
+  auto rootInode = mount.getTreeInode(RelativePathPiece());
+  auto objectStore = mount.getEdenMount()->getObjectStore();
+  auto fetchContext = ObjectFetchContext::getNullContext();
+
+  {
+    auto results = co_await co_applyToVirtualInode(
+        rootInode,
+        std::vector<std::string>{
+            "dir/a.txt", "not/exist/a", "not/exist/b", "dir/sub/b.txt"},
+        [&](const VirtualInode& inode,
+            const RelativePath& path) -> folly::SemiFuture<Hash32> {
+          return inode.getBlake3(path, objectStore, fetchContext).semi();
+        },
+        objectStore,
+        fetchContext);
+
+    EXPECT_EQ(
+        Hash32::blake3(folly::ByteRange{folly::StringPiece{"dir/a.txt"}}),
+        results[0].value());
+    EXPECT_THROW_ERRNO(results[1].value(), ENOENT);
+    EXPECT_THROW_ERRNO(results[2].value(), ENOENT);
+    EXPECT_EQ(
+        Hash32::blake3(folly::ByteRange{folly::StringPiece{"dir/sub/b.txt"}}),
+        results[3].value());
+  }
+
+  {
+    auto results = co_await co_applyToVirtualInode(
+        rootInode,
+        std::vector<std::string>{
+            "dir/sub/b.txt",
+            "dir/a.txt",
+            "not/exist/a",
+            "not/exist/b",
+            "dir/sub/b.txt"},
+        [&](const VirtualInode& inode, const RelativePath& path) {
+          return inode.getBlake3(path, objectStore, fetchContext).semi();
+        },
+        objectStore,
+        fetchContext);
+
+    EXPECT_EQ(
+        Hash32::blake3(folly::ByteRange{folly::StringPiece{"dir/sub/b.txt"}}),
+        results[0].value());
+    EXPECT_EQ(
+        Hash32::blake3(folly::ByteRange{folly::StringPiece{"dir/a.txt"}}),
+        results[1].value());
+    EXPECT_THROW_ERRNO(results[2].value(), ENOENT);
+    EXPECT_THROW_ERRNO(results[3].value(), ENOENT);
+    EXPECT_EQ(results[0].value(), results[4].value())
+        << "dir/sub/b.txt was requested twice and both entries are the same";
+  }
+
+  {
+    auto results = co_await co_applyToVirtualInode(
+        rootInode,
+        std::vector<std::string>{"dir/a.txt", "/invalid///exist/a"},
+        [&](const VirtualInode& inode, const RelativePath& path) {
+          return inode.getBlake3(path, objectStore, fetchContext).semi();
+        },
+        objectStore,
+        fetchContext);
+
+    EXPECT_EQ(
+        Hash32::blake3(folly::ByteRange{folly::StringPiece{"dir/a.txt"}}),
+        results[0].value());
+    EXPECT_THROW_RE(results[1].value(), std::domain_error, "absolute path");
   }
 }
