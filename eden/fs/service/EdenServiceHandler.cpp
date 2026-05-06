@@ -1165,19 +1165,17 @@ EdenServiceHandler::co_getBlake3Impl(
 
   co_await co_waitForPendingWrites(mountHandle.getEdenMount(), *sync);
 
-  auto results =
-      co_await applyToVirtualInode(
-          mountHandle.getRootInode(),
-          *paths,
-          [mountHandle, fetchContext = fetchContext.copy()](
-              const VirtualInode& inode, const RelativePath& path) {
-            return inode
-                .getBlake3(path, mountHandle.getObjectStorePtr(), fetchContext)
-                .semi();
-          },
-          objectStore,
-          fetchContext)
-          .semi();
+  auto results = co_await co_applyToVirtualInode(
+      mountHandle.getRootInode(),
+      *paths,
+      [mountHandle, fetchContext = fetchContext.copy()](
+          VirtualInode inode,
+          RelativePath path) -> folly::coro::now_task<Hash32> {
+        co_return co_await inode.co_getBlake3(
+            path, mountHandle.getObjectStorePtr(), fetchContext);
+      },
+      objectStore,
+      fetchContext);
 
   auto out = std::make_unique<std::vector<Blake3Result>>();
   out->reserve(results.size());
