@@ -15,6 +15,7 @@
 #include <folly/functional/Invoke.h>
 #include <folly/futures/Future.h>
 
+#include <folly/coro/ViaIfAsync.h>
 #include "eden/common/utils/CaseSensitivity.h"
 #include "eden/common/utils/PathMap.h"
 #include "eden/fs/inodes/TreeInode.h"
@@ -203,6 +204,14 @@ class VirtualInodeLoader {
 
 } // namespace detail
 
+// Result type for co_applyToVirtualInode: extracts the inner type from Func's
+// co_awaitable return type (SemiFuture<T>, now_task<T>, etc.).
+// Uses semi_await_result_t so non-awaitable return types produce a compile
+// error.
+template <typename Func>
+using VirtualInodeResult = folly::coro::semi_await_result_t<
+    folly::invoke_result_t<Func&, VirtualInode, RelativePath>>;
+
 /** Given a `rootInode` and a list of `paths` relative to that root,
  * attempt to load the VirtualInode for each.
  *
@@ -270,17 +279,14 @@ auto applyToVirtualInode(
  * via the loader's tree-shaped plan, func via collectAllRange.
  */
 template <typename Func>
-folly::coro::now_task<
-    std::vector<folly::Try<typename folly::isFutureOrSemiFuture<
-        folly::invoke_result_t<Func&, VirtualInode, RelativePath>>::Inner>>>
+folly::coro::now_task<std::vector<folly::Try<VirtualInodeResult<Func>>>>
 co_applyToVirtualInode(
     InodePtr rootInode,
     const std::vector<std::string>& paths,
     Func func,
     const std::shared_ptr<ObjectStore>& store,
     const ObjectFetchContextPtr& fetchContext) {
-  using FuncRet = folly::invoke_result_t<Func&, VirtualInode, RelativePath>;
-  using Result = typename folly::isFutureOrSemiFuture<FuncRet>::Inner;
+  using Result = VirtualInodeResult<Func>;
 
   detail::VirtualInodeLoader loader;
 

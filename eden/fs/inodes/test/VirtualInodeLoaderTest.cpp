@@ -134,7 +134,7 @@ TEST(InodeLoader, notReady) {
   }
 }
 
-CO_TEST(CoInodeLoader, load) {
+CO_TEST(CoInodeLoader, loadBlake3) {
   FakeTreeBuilder builder;
   builder.setFiles(FILES);
   TestMount mount(builder);
@@ -144,13 +144,17 @@ CO_TEST(CoInodeLoader, load) {
   auto fetchContext = ObjectFetchContext::getNullContext();
 
   {
+    // Exercise co_applyToVirtualInode with a now_task-returning func
+    // (co_getBlake3), covering the CoResultOf<now_task<T>> trait path.
     auto results = co_await co_applyToVirtualInode(
         rootInode,
         std::vector<std::string>{
             "dir/a.txt", "not/exist/a", "not/exist/b", "dir/sub/b.txt"},
-        [&](const VirtualInode& inode,
-            const RelativePath& path) -> folly::SemiFuture<Hash32> {
-          return inode.getBlake3(path, objectStore, fetchContext).semi();
+        [objectStore, fetchContext = fetchContext.copy()](
+            VirtualInode inode,
+            RelativePath path) -> folly::coro::now_task<Hash32> {
+          co_return co_await inode.co_getBlake3(
+              path, objectStore, fetchContext);
         },
         objectStore,
         fetchContext);
@@ -166,38 +170,33 @@ CO_TEST(CoInodeLoader, load) {
   }
 
   {
+    // Verify duplicate paths return the same blake3 hash.
     auto results = co_await co_applyToVirtualInode(
         rootInode,
-        std::vector<std::string>{
-            "dir/sub/b.txt",
-            "dir/a.txt",
-            "not/exist/a",
-            "not/exist/b",
-            "dir/sub/b.txt"},
-        [&](const VirtualInode& inode, const RelativePath& path) {
-          return inode.getBlake3(path, objectStore, fetchContext).semi();
+        std::vector<std::string>{"dir/a.txt", "dir/sub/b.txt", "dir/a.txt"},
+        [objectStore, fetchContext = fetchContext.copy()](
+            VirtualInode inode,
+            RelativePath path) -> folly::coro::now_task<Hash32> {
+          co_return co_await inode.co_getBlake3(
+              path, objectStore, fetchContext);
         },
         objectStore,
         fetchContext);
 
-    EXPECT_EQ(
-        Hash32::blake3(folly::ByteRange{folly::StringPiece{"dir/sub/b.txt"}}),
-        results[0].value());
-    EXPECT_EQ(
-        Hash32::blake3(folly::ByteRange{folly::StringPiece{"dir/a.txt"}}),
-        results[1].value());
-    EXPECT_THROW_ERRNO(results[2].value(), ENOENT);
-    EXPECT_THROW_ERRNO(results[3].value(), ENOENT);
-    EXPECT_EQ(results[0].value(), results[4].value())
-        << "dir/sub/b.txt was requested twice and both entries are the same";
+    EXPECT_EQ(results[0].value(), results[2].value())
+        << "dir/a.txt was requested twice and both entries are the same";
   }
 
   {
+    // Verify malformed paths surface as per-result exceptions.
     auto results = co_await co_applyToVirtualInode(
         rootInode,
         std::vector<std::string>{"dir/a.txt", "/invalid///exist/a"},
-        [&](const VirtualInode& inode, const RelativePath& path) {
-          return inode.getBlake3(path, objectStore, fetchContext).semi();
+        [objectStore, fetchContext = fetchContext.copy()](
+            VirtualInode inode,
+            RelativePath path) -> folly::coro::now_task<Hash32> {
+          co_return co_await inode.co_getBlake3(
+              path, objectStore, fetchContext);
         },
         objectStore,
         fetchContext);

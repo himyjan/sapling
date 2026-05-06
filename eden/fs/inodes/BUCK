@@ -263,6 +263,7 @@ cpp_library(
         "//folly/container:evicting_cache_map",
         "//folly/coro:collect",
         "//folly/coro:invoke",
+        "//folly/coro:via_if_async",
         "//folly/coro/safe:now_task",
         "//folly/functional:invoke",
         "//folly/futures:core",

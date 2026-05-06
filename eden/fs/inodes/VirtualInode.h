@@ -136,6 +136,11 @@ class VirtualInode {
       const std::shared_ptr<ObjectStore>& objectStore,
       const ObjectFetchContextPtr& fetchContext) const;
 
+  folly::coro::now_task<Hash32> co_getBlake3(
+      RelativePathPiece path,
+      const std::shared_ptr<ObjectStore>& objectStore,
+      const ObjectFetchContextPtr& fetchContext) const;
+
   ImmediateFuture<std::optional<Hash32>> getDigestHash(
       RelativePathPiece path,
       const std::shared_ptr<ObjectStore>& objectStore,

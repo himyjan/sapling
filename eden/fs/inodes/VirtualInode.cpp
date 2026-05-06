@@ -122,6 +122,55 @@ ImmediateFuture<Hash32> VirtualInode::getBlake3(
       });
 }
 
+folly::coro::now_task<Hash32> VirtualInode::co_getBlake3(
+    RelativePathPiece path,
+    const std::shared_ptr<ObjectStore>& objectStore,
+    const ObjectFetchContextPtr& fetchContext) const {
+  // Ensure this is a regular file.
+  // We intentionally want to refuse to compute the blake3 of symlinks
+  const auto dtype = getDtype();
+  if (dtype == dtype_t::Dir) {
+    co_yield folly::coro::co_error(PathError(EISDIR, path));
+  } else if (dtype == dtype_t::Symlink) {
+    co_yield folly::coro::co_error(
+        PathError(EINVAL, path, std::string_view{"file is a symlink"}));
+  } else if (dtype != dtype_t::Regular) {
+    co_yield folly::coro::co_error(PathError(
+        EINVAL, path, std::string_view{"variant is of unhandled type"}));
+  }
+
+  // This is now guaranteed to be a dtype_t::Regular file. This means there's no
+  // need for a Tree case, as Trees are always directories.
+  //
+  // std::get_if is used instead of match because coroutine lambda captures are
+  // stored in the lambda object, not the coroutine frame. If the coroutine
+  // suspends, match destroys the lambda temporaries, and resuming accesses
+  // dangling captures.
+  static_assert(
+      std::variant_size_v<detail::VariantVirtualInode> == 4,
+      "New variant type added to VariantVirtualInode - update co_getBlake3");
+  if (auto* inode = std::get_if<InodePtr>(&variant_)) {
+    co_return co_await inode->asFilePtr()->getBlake3(fetchContext).semi();
+  } else if (
+      auto* entry =
+          std::get_if<UnmaterializedUnloadedBlobDirEntry>(&variant_)) {
+    co_return co_await objectStore
+        ->getBlobBlake3(entry->getObjectId(), fetchContext)
+        .semi();
+  } else if (auto* treeEntry = std::get_if<TreeEntry>(&variant_)) {
+    const auto& hash = treeEntry->getContentBlake3();
+    if (hash.has_value()) {
+      co_return hash.value();
+    }
+    co_return co_await objectStore
+        ->getBlobBlake3(treeEntry->getObjectId(), fetchContext)
+        .semi();
+  } else {
+    // TreePtr - directories cannot have blake3
+    co_yield folly::coro::co_error(PathError(EISDIR, path));
+  }
+}
+
 ImmediateFuture<std::optional<Hash32>> VirtualInode::getDigestHash(
     RelativePathPiece path,
     const std::shared_ptr<ObjectStore>& objectStore,
