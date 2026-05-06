@@ -85,6 +85,7 @@ members = [
   "inodes/overlay/clients",
   "inodes/overlay/mocks",
   "inodes/overlay/services",
+  "rust/backtrace_ffi",
   "rust/edenfs-asserted-states",
   "rust/edenfs-asserted-states-client",
   "rust/manifold_ffi",
