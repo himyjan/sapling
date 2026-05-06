@@ -9,4 +9,4 @@ license = "GPLv2+"
 
 [dependencies]
 backtrace = "0.3"
-cxx = "1.0.119"
+cxx = "1.0.194"
