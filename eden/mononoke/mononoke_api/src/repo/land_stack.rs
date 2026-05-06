@@ -82,6 +82,7 @@ impl<R: MononokeRepo> RepoContext<R> {
             pushrebase_distance,
             log_id,
             merge_resolved_paths,
+            merge_summary,
         }) = outcome;
         redirector.ensure_backsynced(ctx, log_id).await?;
 
@@ -100,6 +101,7 @@ impl<R: MononokeRepo> RepoContext<R> {
             pushrebase_distance,
             log_id,
             merge_resolved_paths,
+            merge_summary,
         }))
     }
 

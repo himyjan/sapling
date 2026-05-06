@@ -121,6 +121,10 @@ use repo_identity::RepoIdentityRef;
 use shared_error::std::SharedError;
 use stats::prelude::*;
 use thiserror::Error;
+
+mod merge_resolution_summary;
+pub use merge_resolution_summary::MR_PATH_SAMPLE_CAP;
+pub use merge_resolution_summary::MergeResolutionSummary;
 use three_way_merge::MergeResult;
 use three_way_merge::merge_text;
 use tokio::sync::oneshot;
@@ -242,6 +246,11 @@ pub struct PushrebaseOutcome {
     /// `None` means no merge resolution was performed (no conflicts, or feature disabled).
     /// `Some(paths)` means these paths had conflicting edits that were auto-merged.
     pub merge_resolved_paths: Option<Vec<NonRootMPath>>,
+    /// Per-push merge-resolution summary. `None` during the staged rollout
+    /// when not yet populated by all pushrebase paths; once every path
+    /// populates this, the field will be tightened to required.
+    /// See `MergeResolutionSummary::add_to_scuba` for the Scuba schema.
+    pub merge_summary: Option<MergeResolutionSummary>,
 }
 
 /// Result of indexing a pushrebase request
@@ -678,6 +687,7 @@ pub async fn do_batched_pushrebase(
                     pushrebase_distance: PushrebaseDistance(p.pushrebase_distance),
                     log_id,
                     merge_resolved_paths: p.merge_resolved_paths,
+                    merge_summary: None,
                 }));
             }
             vec![]
@@ -998,6 +1008,7 @@ async fn rebase_with_lock(
         pushrebase_distance: PushrebaseDistance(rebase.pushrebase_distance),
         log_id: BookmarkUpdateLogId(log_id),
         merge_resolved_paths: rebase.merge_resolved_paths,
+        merge_summary: None,
     })
 }
 
@@ -1583,6 +1594,7 @@ fn dispatch_batch_results(
             pushrebase_distance: PushrebaseDistance(p.pushrebase_distance),
             log_id: BookmarkUpdateLogId(log_id),
             merge_resolved_paths: p.merge_resolved_paths,
+            merge_summary: None,
         }));
     }
 }
@@ -1730,6 +1742,7 @@ async fn rebase_in_loop(
                 pushrebase_distance,
                 log_id,
                 merge_resolved_paths,
+                merge_summary: None,
             };
             return Ok(res);
         } else {
