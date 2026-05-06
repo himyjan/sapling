@@ -57,14 +57,14 @@ pub fn looks_compressed(prefix: &[u8]) -> Option<&'static str> {
         }
     }
 
-    if prefix.len() >= 3 && &prefix[..3] == [0xff, 0xd8, 0xff] {
+    if prefix.len() >= 3 && prefix[..3] == [0xff, 0xd8, 0xff] {
         return Some("jpeg");
     }
 
-    if prefix.len() >= 6 && &prefix[..6] == [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00] {
+    if prefix.len() >= 6 && prefix[..6] == [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00] {
         return Some("xz");
     }
-    if prefix.len() >= 6 && &prefix[..6] == [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c] {
+    if prefix.len() >= 6 && prefix[..6] == [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c] {
         return Some("7z");
     }
 
@@ -74,7 +74,7 @@ pub fn looks_compressed(prefix: &[u8]) -> Option<&'static str> {
     }
 
     // WebM / Matroska EBML
-    if prefix.len() >= 4 && &prefix[..4] == [0x1a, 0x45, 0xdf, 0xa3] {
+    if prefix.len() >= 4 && prefix[..4] == [0x1a, 0x45, 0xdf, 0xa3] {
         return Some("matroska");
     }
 
