@@ -59,9 +59,19 @@ class Client:
         self._oauth = None
         self._catslocation = None
         self._cats = None
-        self._applyarcconfig(
-            arcconfig.loadforpath(repodir), ui.config("phabricator", "arcrc_host")
-        )
+        # phabricator.use-unix-socket is escape hatch in case something breaks.
+        unix_socket_path = ui.configbool(
+            "phabricator", "use-unix-socket", default=True
+        ) and ui.config("auth_proxy", "unix_socket_path")
+
+        # TODO: remove this force_arcrc safety check when sl release has soaked
+        # for a while.
+        force_arcrc = ui.configbool("phabricator", "force_arcrc", False)
+        if not unix_socket_path or force_arcrc:
+            self._applyarcconfig(
+                arcconfig.loadforpath(repodir), ui.config("phabricator", "arcrc_host")
+            )
+
         if not self._mock:
             app_id = ui.config("phabricator", "graphql_app_id")
             self._host = ui.config("phabricator", "graphql_host")
@@ -69,11 +79,6 @@ class Client:
                 raise GraphQLConfigError(
                     "GraphQL unavailable because of missing configuration"
                 )
-
-            # phabricator.use-unix-socket is escape hatch in case something breaks.
-            unix_socket_path = ui.configbool(
-                "phabricator", "use-unix-socket", default=True
-            ) and ui.config("auth_proxy", "unix_socket_path")
 
             self._client = phabricator_graphql_client.PhabricatorGraphQLClient(
                 phabricator_graphql_client_urllib.PhabricatorGraphQLClientRequests(
