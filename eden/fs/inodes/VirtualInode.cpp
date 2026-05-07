@@ -150,7 +150,7 @@ folly::coro::now_task<Hash32> VirtualInode::co_getBlake3(
       std::variant_size_v<detail::VariantVirtualInode> == 4,
       "New variant type added to VariantVirtualInode - update co_getBlake3");
   if (auto* inode = std::get_if<InodePtr>(&variant_)) {
-    co_return co_await inode->asFilePtr()->getBlake3(fetchContext).semi();
+    co_return co_await inode->asFilePtr()->co_getBlake3(fetchContext);
   } else if (
       auto* entry =
           std::get_if<UnmaterializedUnloadedBlobDirEntry>(&variant_)) {

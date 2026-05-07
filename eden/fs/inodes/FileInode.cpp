@@ -914,6 +914,24 @@ ImmediateFuture<Hash32> FileInode::getBlake3(
   XLOGF(FATAL, "FileInode in illegal state: {}", state->tag);
 }
 
+folly::coro::now_task<Hash32> FileInode::co_getBlake3(
+    const ObjectFetchContextPtr& fetchContext) {
+  auto state = LockedState{this};
+
+  logAccess(*fetchContext);
+  if (state->tag == State::BLOB_NOT_LOADING ||
+      state->tag == State::BLOB_LOADING) {
+    auto id = state->nonMaterializedState.id;
+    state.unlock();
+    co_return co_await getObjectStore().getBlobBlake3(id, fetchContext).semi();
+  } else if (state->tag == State::MATERIALIZED_IN_OVERLAY) {
+    co_return state->materializedState.getBlake3(
+        *this, getMount()->getEdenConfig()->blake3Key.getValue());
+  }
+
+  XLOGF(FATAL, "FileInode in illegal state: {}", state->tag);
+}
+
 ImmediateFuture<BlobAuxData> FileInode::getBlobAuxData(
     const ObjectFetchContextPtr& fetchContext,
     bool blake3Required) {
