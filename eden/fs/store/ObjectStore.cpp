@@ -581,6 +581,25 @@ ImmediateFuture<BlobAuxData> ObjectStore::getBlobAuxData(
     const ObjectId& id,
     const ObjectFetchContextPtr& fetchContext,
     bool blake3Needed) const {
+  // DEPRECATED: use co_getBlobAuxData directly. Kept only because
+  // EdenServiceHandler.cpp, VirtualInode.cpp, FileInode.cpp, getBlobSize,
+  // getBlobSha1, and getBlobBlake3 still consume ImmediateFuture chains;
+  // delete once those paths are migrated to coroutines.
+  if (getEdenConfig()->enableCoroutinesPhase5.getValue()) {
+    return ImmediateFuture{
+        // @lint-ignore CLANGTIDY facebook-folly-coro-return-captures-local-var
+        folly::coro::co_invoke(
+            [self = shared_from_this()](
+                ObjectId oid, ObjectFetchContextPtr ctx, bool b3)
+                -> folly::coro::Task<BlobAuxData> {
+              co_return co_await self->co_getBlobAuxData(oid, ctx, b3);
+            },
+            ObjectId{id},
+            fetchContext.copy(),
+            blake3Needed)
+            .semi()};
+  }
+
   DurationScope<EdenStats> statScope{stats_, &ObjectStoreStats::getBlobAuxData};
   folly::stop_watch<std::chrono::milliseconds> watch;
 
@@ -657,6 +676,60 @@ ImmediateFuture<BlobAuxData> ObjectStore::getBlobAuxData(
           });
 }
 
+folly::coro::now_task<BlobAuxData> ObjectStore::co_getBlobAuxData(
+    const ObjectId& id,
+    const ObjectFetchContextPtr& fetchContext,
+    bool blake3Needed) const {
+  DurationScope<EdenStats> statScope{stats_, &ObjectStoreStats::getBlobAuxData};
+  folly::stop_watch<std::chrono::milliseconds> watch;
+
+  // Check in-memory cache
+  auto inMemoryCacheBlobAuxData =
+      getBlobAuxDataFromInMemoryCache(id, fetchContext);
+  if (inMemoryCacheBlobAuxData) {
+    if (blake3Needed && !inMemoryCacheBlobAuxData->blake3) {
+      auto blob = co_await co_getBlob(id, fetchContext);
+      auto blake3 = computeBlake3(*blob);
+      inMemoryCacheBlobAuxData->blake3.emplace(blake3);
+      blobAuxDataCache_.store(id, *inMemoryCacheBlobAuxData);
+      stats_->increment(&ObjectStoreStats::getBlobAuxDataFromBlob);
+      stats_->addDuration(
+          &ObjectStoreStats::getBlobAuxDataFromBlobDuration, watch.elapsed());
+    } else {
+      stats_->increment(&ObjectStoreStats::getBlobAuxDataFromMemory);
+      stats_->addDuration(
+          &ObjectStoreStats::getBlobAuxDataMemoryDuration, watch.elapsed());
+    }
+    co_return std::move(inMemoryCacheBlobAuxData).value();
+  }
+
+  deprioritizeWhenFetchHeavy(*fetchContext);
+
+  auto result = co_await co_getBlobAuxDataImpl(id, fetchContext, watch);
+  if (!result.blobAux) {
+    stats_->increment(&ObjectStoreStats::getBlobAuxDataFailed);
+    XLOGF(DBG4, "unable to find aux data for {}", id);
+    throwf<std::domain_error>("aux data {} not found", id);
+  }
+
+  auto auxData = std::move(result.blobAux);
+  if (blake3Needed && !auxData->blake3) {
+    auto blob = co_await co_getBlob(id, fetchContext);
+    auto blake3 = computeBlake3(*blob);
+    auto auxDataCopy = *auxData;
+    auxDataCopy.blake3.emplace(blake3);
+    blobAuxDataCache_.store(id, auxDataCopy);
+    fetchContext->didFetch(ObjectFetchContext::BlobAuxData, id, result.origin);
+    updateProcessFetch(*fetchContext);
+    co_return auxDataCopy;
+  } else {
+    blobAuxDataCache_.store(id, *auxData);
+    fetchContext->didFetch(ObjectFetchContext::BlobAuxData, id, result.origin);
+    updateProcessFetch(*fetchContext);
+    co_return *auxData;
+  }
+}
+
 folly::SemiFuture<BackingStore::GetBlobAuxResult>
 ObjectStore::getBlobAuxDataImpl(
     const ObjectId& id,
@@ -718,6 +791,60 @@ ObjectStore::getBlobAuxDataImpl(
       .semi();
 }
 
+folly::coro::now_task<BackingStore::GetBlobAuxResult>
+ObjectStore::co_getBlobAuxDataImpl(
+    const ObjectId& id,
+    const ObjectFetchContextPtr& context,
+    folly::stop_watch<std::chrono::milliseconds> watch) const {
+  auto resultTry = co_await folly::coro::co_awaitTry(
+      ImmediateFuture{backingStore_->getBlobAuxData(id, context)}.semi());
+  if (resultTry.hasException()) {
+    stats_->increment(&ObjectStoreStats::getBlobAuxDataFailed);
+    XLOGF(DBG4, "unable to find aux data for {}", id);
+    co_yield folly::coro::co_error(std::move(resultTry).exception());
+  }
+
+  auto result = std::move(resultTry).value();
+  if (result.blobAux && result.blobAux->sha1 != kZeroHash) {
+    stats_->increment(&ObjectStoreStats::getBlobAuxDataFromBackingStore);
+    stats_->addDuration(
+        &ObjectStoreStats::getBlobAuxDataBackingstoreDuration, watch.elapsed());
+    co_return result;
+  }
+
+  auto blobResultTry =
+      co_await folly::coro::co_awaitTry(co_getBlobImpl(id, context));
+  if (blobResultTry.hasException()) {
+    stats_->increment(&ObjectStoreStats::getBlobAuxDataFailed);
+    XLOGF(DBG4, "unable to find aux data for {}", id);
+    co_yield folly::coro::co_error(std::move(blobResultTry).exception());
+  }
+
+  auto blobResult = std::move(blobResultTry).value();
+  if (blobResult.blob) {
+    stats_->increment(&ObjectStoreStats::getBlobAuxDataFromBlob);
+
+    std::optional<Hash32> blake3;
+    if (result.blobAux && result.blobAux->blake3.has_value()) {
+      blake3 = result.blobAux->blake3.value();
+    }
+
+    stats_->addDuration(
+        &ObjectStoreStats::getBlobAuxDataFromBlobDuration, watch.elapsed());
+
+    co_return BackingStore::GetBlobAuxResult{
+        std::make_shared<BlobAuxData>(
+            Hash20::sha1(blobResult.blob->getContents()),
+            std::move(blake3),
+            blobResult.blob->getSize()),
+        blobResult.origin};
+  }
+
+  stats_->increment(&ObjectStoreStats::getBlobAuxDataFailed);
+  co_return BackingStore::GetBlobAuxResult{
+      nullptr, ObjectFetchContext::Origin::NotFetched};
+}
+
 ImmediateFuture<uint64_t> ObjectStore::getBlobSize(
     const ObjectId& id,
     const ObjectFetchContextPtr& context) const {
@@ -768,7 +895,7 @@ folly::coro::now_task<Hash32> ObjectStore::co_getBlobBlake3(
     const ObjectId& id,
     const ObjectFetchContextPtr& context) const {
   auto auxData =
-      co_await getBlobAuxData(id, context, true /* blake3Needed */).semi();
+      co_await co_getBlobAuxData(id, context, true /* blake3Needed */);
   if (auxData.blake3) {
     co_return *auxData.blake3;
   }

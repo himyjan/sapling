@@ -306,6 +306,11 @@ class ObjectStore : public IObjectStore,
       const ObjectFetchContextPtr& context,
       bool blake3Needed = false) const;
 
+  folly::coro::now_task<BlobAuxData> co_getBlobAuxData(
+      const ObjectId& id,
+      const ObjectFetchContextPtr& context,
+      bool blake3Needed = false) const;
+
   /**
    * Get aux data about a Blob from EdenFS's in memory BlobAuxData cache.
    *
@@ -471,6 +476,11 @@ class ObjectStore : public IObjectStore,
       const ObjectFetchContextPtr& context) const;
 
   folly::SemiFuture<BackingStore::GetBlobAuxResult> getBlobAuxDataImpl(
+      const ObjectId& id,
+      const ObjectFetchContextPtr& context,
+      folly::stop_watch<std::chrono::milliseconds> watch) const;
+
+  folly::coro::now_task<BackingStore::GetBlobAuxResult> co_getBlobAuxDataImpl(
       const ObjectId& id,
       const ObjectFetchContextPtr& context,
       folly::stop_watch<std::chrono::milliseconds> watch) const;
