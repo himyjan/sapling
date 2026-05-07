@@ -154,17 +154,15 @@ folly::coro::now_task<Hash32> VirtualInode::co_getBlake3(
   } else if (
       auto* entry =
           std::get_if<UnmaterializedUnloadedBlobDirEntry>(&variant_)) {
-    co_return co_await objectStore
-        ->getBlobBlake3(entry->getObjectId(), fetchContext)
-        .semi();
+    co_return co_await objectStore->co_getBlobBlake3(
+        entry->getObjectId(), fetchContext);
   } else if (auto* treeEntry = std::get_if<TreeEntry>(&variant_)) {
     const auto& hash = treeEntry->getContentBlake3();
     if (hash.has_value()) {
       co_return hash.value();
     }
-    co_return co_await objectStore
-        ->getBlobBlake3(treeEntry->getObjectId(), fetchContext)
-        .semi();
+    co_return co_await objectStore->co_getBlobBlake3(
+        treeEntry->getObjectId(), fetchContext);
   } else {
     // TreePtr - directories cannot have blake3
     co_yield folly::coro::co_error(PathError(EISDIR, path));

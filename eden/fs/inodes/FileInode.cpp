@@ -923,7 +923,8 @@ folly::coro::now_task<Hash32> FileInode::co_getBlake3(
       state->tag == State::BLOB_LOADING) {
     auto id = state->nonMaterializedState.id;
     state.unlock();
-    co_return co_await getObjectStore().getBlobBlake3(id, fetchContext).semi();
+    // If a file is not materialized, it should have a id value.
+    co_return co_await getObjectStore().co_getBlobBlake3(id, fetchContext);
   } else if (state->tag == State::MATERIALIZED_IN_OVERLAY) {
     co_return state->materializedState.getBlake3(
         *this, getMount()->getEdenConfig()->blake3Key.getValue());

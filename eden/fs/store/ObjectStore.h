@@ -338,6 +338,10 @@ class ObjectStore : public IObjectStore,
       const ObjectId& id,
       const ObjectFetchContextPtr& context) const;
 
+  folly::coro::now_task<Hash32> co_getBlobBlake3(
+      const ObjectId& id,
+      const ObjectFetchContextPtr& context) const;
+
   /**
    * Compares the objects.
    *

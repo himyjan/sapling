@@ -503,14 +503,10 @@ folly::coro::now_task<std::shared_ptr<const Blob>> ObjectStore::co_getBlob(
     const ObjectFetchContextPtr& fetchContext) const {
   DurationScope<EdenStats> statScope{stats_, &ObjectStoreStats::getBlob};
   deprioritizeWhenFetchHeavy(*fetchContext);
-  try {
-    auto result = co_await co_getBlobImpl(id, fetchContext);
-    updateProcessFetch(*fetchContext);
-    fetchContext->didFetch(ObjectFetchContext::Blob, id, result.origin);
-    co_return std::move(result.blob);
-  } catch (const std::exception&) {
-    throw;
-  }
+  auto result = co_await co_getBlobImpl(id, fetchContext);
+  updateProcessFetch(*fetchContext);
+  fetchContext->didFetch(ObjectFetchContext::Blob, id, result.origin);
+  co_return std::move(result.blob);
 }
 
 folly::SemiFuture<BackingStore::GetBlobResult> ObjectStore::getBlobImpl(
@@ -766,6 +762,18 @@ ImmediateFuture<Hash32> ObjectStore::getBlobBlake3(
             EDEN_BUG() << fmt::format(
                 "Blake3 hash is not defined for id={}", id);
           });
+}
+
+folly::coro::now_task<Hash32> ObjectStore::co_getBlobBlake3(
+    const ObjectId& id,
+    const ObjectFetchContextPtr& context) const {
+  auto auxData =
+      co_await getBlobAuxData(id, context, true /* blake3Needed */).semi();
+  if (auxData.blake3) {
+    co_return *auxData.blake3;
+  }
+
+  EDEN_BUG() << fmt::format("Blake3 hash is not defined for id={}", id);
 }
 
 ImmediateFuture<bool> ObjectStore::areBlobsEqual(
